@@ -26,7 +26,7 @@ func TestRetryReportFiltersAndPreservesPairs(t *testing.T) {
 }
 
 func TestRetryReportRejectsInvalidReports(t *testing.T) {
-	for _, data := range []string{`{`, `{}`, `{"results":null}`, `{"results":[{}]}`, `{"results":[{"paths":[""]}]}`, `{"results":[],"album":{"error":"failed"}}`} {
+	for _, data := range []string{`{`, `{}`, `{"results":null}`, `{"total":10,"results":[]}`, `{"canceled":true,"results":[]}`, `{"results":[{}]}`, `{"results":[{"paths":[""]}]}`, `{"results":[],"album":{"error":"failed"}}`} {
 		path := filepath.Join(t.TempDir(), "report.json")
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 			t.Fatal(err)
