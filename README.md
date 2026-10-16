@@ -23,6 +23,7 @@ Download the `gotohp-cli` release artifact for your platform. It runs without th
 
 ```shell
 gotohp-cli upload /path/to/photos --recursive --threads 5
+gotohp-cli upload /path/to/photos --recursive --report-file upload-report.json
 gotohp-cli creds add "<oauth_token cookie value>"   # Embedded Setup sign-in, see below
 gotohp-cli creds add "androidId=..."                 # or a raw credential string
 gotohp-cli creds add - < token.txt                   # or read either from stdin
@@ -30,6 +31,8 @@ gotohp-cli creds set user@gmail.com
 ```
 
 The CLI shares the config file with the GUI, but reads only the stored credentials from it. Everything else (proxy, quality, upload behaviour) is set by flags, so a scripted run is unaffected by preferences changed in the GUI. Pass `--config <path>` to use a different config file and `--account <email>` to upload with a specific stored account.
+
+`--report-file <path>` writes the final JSON summary to a file while keeping the interactive progress UI visible when the command is run in a terminal.
 
 Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
 

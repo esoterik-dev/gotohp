@@ -44,6 +44,7 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
 	f.StringP("log-level", "l", "info", "log level: debug, info, warn, error")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
+	f.String("report-file", "", "write the final JSON summary to PATH")
 
 	// Accepted for compatibility; skipping incomplete pairs is already the default.
 	f.Bool("skip-incomplete-live-photos", false, "")
@@ -54,8 +55,9 @@ func newUploadCommand() *cobra.Command {
 
 // uploadRunSettings holds CLI-only settings that are not part of UploadOptions.
 type uploadRunSettings struct {
-	logLevel string
-	noTUI    bool
+	logLevel   string
+	noTUI      bool
+	reportFile string
 }
 
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
@@ -82,7 +84,12 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 
 	logLevel, _ := f.GetString("log-level")
 	noTUI, _ := f.GetBool("no-tui")
-	return runUpload(paths, opts, uploadRunSettings{logLevel: logLevel, noTUI: noTUI})
+	reportFile, _ := f.GetString("report-file")
+	return runUpload(paths, opts, uploadRunSettings{
+		logLevel:   logLevel,
+		noTUI:      noTUI,
+		reportFile: reportFile,
+	})
 }
 
 // uploadOptionsFromFlags builds run options from defaults plus the parsed flags.

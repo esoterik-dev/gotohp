@@ -151,3 +151,31 @@ func TestFinishUploadRetainsEarlierAlbumFailure(t *testing.T) {
 		t.Errorf("album failure or successful upload was lost from JSON: %+v", summary)
 	}
 }
+
+func TestFinishUploadWritesReportFile(t *testing.T) {
+	model := runReporterProgram(t, func(r teaReporter) {
+		r.UploadStart(core.UploadBatchStart{Total: 1})
+		r.FileResult(core.FileUploadResult{Path: "photo.jpg", MediaKey: "saved-key"})
+	})
+
+	var stdout bytes.Buffer
+	reportPath := filepath.Join(t.TempDir(), "upload-report.json")
+	if err := finishUploadWithReport(model, &stdout, reportPath); err != nil {
+		t.Fatalf("finishUploadWithReport returned an error: %v", err)
+	}
+
+	var stdoutSummary, reportSummary uploadSummary
+	if err := json.Unmarshal(stdout.Bytes(), &stdoutSummary); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v", err)
+	}
+	report, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report file: %v", err)
+	}
+	if err := json.Unmarshal(report, &reportSummary); err != nil {
+		t.Fatalf("report file is not valid JSON: %v", err)
+	}
+	if !reflect.DeepEqual(reportSummary, stdoutSummary) {
+		t.Fatalf("report summary differs from stdout: report=%+v stdout=%+v", reportSummary, stdoutSummary)
+	}
+}

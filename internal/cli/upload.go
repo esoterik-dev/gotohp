@@ -409,7 +409,7 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	}
 
 	if m, ok := finalModel.(uploadModel); ok {
-		return finishUpload(m, os.Stdout)
+		return finishUploadWithReport(m, os.Stdout, settings.reportFile)
 	}
 
 	return nil
@@ -417,12 +417,22 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 
 // finishUpload writes the complete result before reporting a failed run.
 func finishUpload(model uploadModel, output io.Writer) error {
+	return finishUploadWithReport(model, output, "")
+}
+
+func finishUploadWithReport(model uploadModel, output io.Writer, reportFile string) error {
 	jsonOutput, err := json.MarshalIndent(buildUploadSummary(model), "", "  ")
 	if err != nil {
 		return fmt.Errorf("error generating JSON: %w", err)
 	}
-	if _, err := fmt.Fprintln(output, string(jsonOutput)); err != nil {
+	jsonOutput = append(jsonOutput, '\n')
+	if _, err := output.Write(jsonOutput); err != nil {
 		return fmt.Errorf("error writing JSON: %w", err)
+	}
+	if reportFile != "" {
+		if err := os.WriteFile(reportFile, []byte(jsonOutput), 0o600); err != nil {
+			return fmt.Errorf("error writing JSON report %q: %w", reportFile, err)
+		}
 	}
 	if model.failed > 0 || model.albumError != "" {
 		return exitError{code: 1}
