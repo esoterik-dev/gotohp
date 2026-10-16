@@ -430,7 +430,7 @@ func finishUploadWithReport(model uploadModel, output io.Writer, reportFile stri
 		return fmt.Errorf("error writing JSON: %w", err)
 	}
 	if reportFile != "" {
-		if err := os.WriteFile(reportFile, []byte(jsonOutput), 0o600); err != nil {
+		if err := writeUploadReport(reportFile, jsonOutput); err != nil {
 			return fmt.Errorf("error writing JSON report %q: %w", reportFile, err)
 		}
 	}
