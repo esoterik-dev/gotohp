@@ -1,0 +1,47 @@
+name: Sync dev integration branch
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: sync-dev
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      # Never execute PR code in this privileged workflow. Only merge Git refs.
+      - name: Merge owner's open PRs into dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin
+          if git show-ref --verify --quiet refs/remotes/origin/dev; then
+            git switch -c dev origin/dev
+          else
+            git switch -c dev origin/main
+          fi
+          git merge --no-edit origin/main
+          numbers=$(gh pr list --repo "$REPO" --author "$OWNER" --base main --state open --limit 1000 --json number --jq '.[].number' | sort -n)
+          for number in $numbers; do
+            git fetch origin "refs/pull/$number/head"
+            git merge --no-edit FETCH_HEAD
+          done
+          git push origin dev

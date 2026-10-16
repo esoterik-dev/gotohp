@@ -150,5 +150,14 @@ From the CLI, open the same page yourself and run `gotohp-cli creds add "<oauth_
 
 ## Build
 
-Follow official wails3 guide
-[https://v3.wails.io/getting-started/installation/](https://v3.wails.io/getting-started/installation/)
+CLI only (no Wails or GUI dependencies):
+
+```sh
+go build -tags cli -o bin/gotohp-cli .
+```
+
+For a fork with an integration branch, `scripts/update-dev.sh` merges `origin/main` and the fork owner's open PRs targeting `main` into `dev`, tests the CLI, and atomically replaces `bin/gotohp-cli` from that branch only. Requires authenticated `gh`, Git, Go, and Bash; configure `origin` and `gh repo set-default` for your fork. It never stages files or resets branches. Tracked edits or merge conflicts stop the update; resolve conflicts on `dev` and rerun. `--background` skips dirty checkouts and branches other than `dev`. A local scheduler can call it periodically. Untracked personal notes remain untouched.
+
+The `Sync dev integration branch` workflow keeps GitHub's `dev` updated when owner PRs change, once the workflow is merged into the default branch. Conflicts fail visibly rather than discard work. Previously integrated closed PRs are not automatically reverted. Local binaries are updated by the script, not by GitHub Actions.
+
+For GUI builds, follow the official [Wails 3 installation guide](https://v3.wails.io/getting-started/installation/).
