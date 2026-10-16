@@ -38,6 +38,8 @@ The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files fin
 
 Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
 
+`gotohp-cli upload --retry-report upload-report.json --threads 1` retries only failed, non-skipped paths, without rescanning a directory. Do not supply positional paths with this flag. Repeat the original account, quality, date, album, and pairing/repair flags as needed; a report is not a configuration file. Two-file failures require `--pair-live-photos`. Album-only failures need separate album repair and are not silently treated as successful file retries. Keep each run's report under a new filename.
+
 The GUI binary runs the same CLI when given a command, e.g. `gotohp upload ...`.
 
 ## Sign in
