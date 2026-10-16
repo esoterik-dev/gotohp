@@ -25,7 +25,9 @@ func retryReportPaths(path string, pairLivePhotos bool) ([]string, error) {
 		return nil, fmt.Errorf("read retry report: %w", err)
 	}
 	var report struct {
-		Results *[]struct {
+		Total    int  `json:"total"`
+		Canceled bool `json:"canceled"`
+		Results  *[]struct {
 			Path    string   `json:"path"`
 			Paths   []string `json:"paths"`
 			Success bool     `json:"success"`
@@ -40,6 +42,9 @@ func retryReportPaths(path string, pairLivePhotos bool) ([]string, error) {
 	}
 	if report.Results == nil {
 		return nil, fmt.Errorf("retry report must contain a results array")
+	}
+	if report.Total > len(*report.Results) || (report.Canceled && len(*report.Results) == 0) {
+		return nil, fmt.Errorf("incomplete report lacks source paths; rerun original sources with upload state instead")
 	}
 	paths := []string{}
 	seen := make(map[string]bool)
