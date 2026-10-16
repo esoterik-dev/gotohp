@@ -128,6 +128,9 @@ func uploadOptionsFromFlags(f *pflag.FlagSet) core.UploadOptions {
 // validateUploadOptions rejects flags that only make sense with Live Photo
 // pairing enabled.
 func validateUploadOptions(f *pflag.FlagSet, opts core.UploadOptions) error {
+	if err := validateReportPaths(f); err != nil {
+		return err
+	}
 	if opts.PairLivePhotos {
 		return nil
 	}
