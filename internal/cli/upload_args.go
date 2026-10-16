@@ -21,7 +21,7 @@ func newUploadCommand() *cobra.Command {
 		Long: "Upload files or directories to Google Photos.\n\n" +
 			"The config file only supplies credentials. Everything else, including the\n" +
 			"proxy and quality settings, is controlled by flags; GUI preferences do not apply.",
-		Args: cobra.MinimumNArgs(1),
+		Args: uploadArgs,
 		RunE: runUploadCommand,
 	}
 	f := cmd.Flags()
@@ -45,6 +45,7 @@ func newUploadCommand() *cobra.Command {
 	f.StringP("log-level", "l", "info", "log level: debug, info, warn, error")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
 	f.String("report-file", "", "write the final JSON summary to PATH")
+	f.String("retry-report", "", "retry only failed, non-skipped files from a JSON report; no positional paths")
 
 	// Accepted for compatibility; skipping incomplete pairs is already the default.
 	f.Bool("skip-incomplete-live-photos", false, "")
@@ -61,6 +62,18 @@ type uploadRunSettings struct {
 }
 
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
+	if report, _ := cmd.Flags().GetString("retry-report"); report != "" {
+		var err error
+		pair, _ := cmd.Flags().GetBool("pair-live-photos")
+		paths, err = retryReportPaths(report, pair)
+		if err != nil {
+			return err
+		}
+		if len(paths) == 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "No failed non-skipped files to retry")
+			return nil
+		}
+	}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
 			return fmt.Errorf("invalid upload path %q: %w", path, err)
