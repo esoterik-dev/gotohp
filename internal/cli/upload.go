@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"app/core"
 
@@ -79,6 +81,8 @@ type uploadModel struct {
 	warnings     []uploadWarning
 	width        int
 	quitting     bool
+	canceled     bool
+	cancel       func()
 	// Album state
 	albumName       string
 	albumItemsAdded int
@@ -113,6 +117,7 @@ type albumSummary struct {
 }
 
 type uploadSummary struct {
+	Canceled  bool            `json:"canceled,omitempty"`
 	Total     int             `json:"total"`
 	Succeeded int             `json:"succeeded"`
 	Failed    int             `json:"failed"`
@@ -146,6 +151,9 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uploadStartMsg:
 		m.totalFiles = msg.total
+		if m.canceled && m.cancel != nil {
+			m.cancel()
+		}
 		return m, nil
 
 	case fileProgressMsg:
@@ -211,8 +219,11 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
-			m.quitting = true
-			return m, tea.Quit
+			m.canceled = true
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, nil // Drain worker results before writing the final report.
 		}
 	}
 
@@ -390,7 +401,7 @@ func newLogger(level slog.Level) *slog.Logger {
 // summary when it completes.
 func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettings) error {
 	model := initialModel()
-	programOptions := []tea.ProgramOption{}
+	programOptions := []tea.ProgramOption{tea.WithoutSignalHandler()}
 	if !shouldUseTUI(settings) {
 		programOptions = append(
 			programOptions,
@@ -398,14 +409,28 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 			tea.WithoutRenderer(),
 		)
 	}
+	var uploadManager *core.UploadManager
+	model.cancel = func() { uploadManager.Cancel() }
 	p := tea.NewProgram(model, programOptions...)
-
-	uploadManager := core.NewUploadManager(teaReporter{p: p}, newLogger(parseLogLevel(settings.logLevel)))
+	uploadManager = core.NewUploadManager(teaReporter{p: p}, newLogger(parseLogLevel(settings.logLevel)))
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-signals:
+			p.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+		case <-done:
+		}
+	}()
 	go uploadManager.Upload(paths, opts)
 
 	// Run until the upload manager reports UploadStop.
 	finalModel, err := p.Run()
 	if err != nil {
+		uploadManager.Cancel()
 		return fmt.Errorf("error running upload program: %w", err)
 	}
 
@@ -436,6 +461,9 @@ func finishUpload(model uploadModel, output io.Writer, reportFile string) error 
 	if err := errors.Join(reportErr, outputErr); err != nil {
 		return err
 	}
+	if model.canceled {
+		return exitError{code: 130}
+	}
 	if model.failed > 0 || model.albumError != "" {
 		return exitError{code: 1}
 	}
@@ -451,6 +479,7 @@ func buildUploadSummary(model uploadModel) uploadSummary {
 		warnings = append(warnings, warning)
 	}
 	summary := uploadSummary{
+		Canceled:  model.canceled,
 		Total:     model.totalFiles,
 		Succeeded: model.completed,
 		Failed:    model.failed,
