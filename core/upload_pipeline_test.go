@@ -408,3 +408,37 @@ func TestUploadDuplicateWithFailedDeleteIsSkipped(t *testing.T) {
 		t.Fatalf("source should still exist: %v", err)
 	}
 }
+
+// README: with --stage-local the staged copy is uploaded even if the source
+// changes afterwards; only --delete keeps the changed source.
+func TestUploadStagedCopyIgnoresSourceChange(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 2)
+	lib := newFakeLibrary()
+	lib.uploadGate = make(chan struct{})
+	lib.uploadStarted = make(chan string, len(paths))
+	_, rec := startRun(lib, paths, UploadOptions{HashThreads: 2, UploadThreads: 1, StageLocal: true, DeleteFromHost: true})
+	select {
+	case <-lib.uploadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upload started")
+	}
+	// Both files are staged and hashed by now or soon; change both sources.
+	time.Sleep(200 * time.Millisecond)
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte("changed after staging"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(lib.uploadGate)
+	rec.wait(t)
+	for _, res := range rec.results {
+		if res.IsError || res.MediaKey == "" {
+			t.Fatalf("staged copy not uploaded: %+v", res)
+		}
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("changed source %s was deleted: %v", filepath.Base(p), err)
+		}
+	}
+}

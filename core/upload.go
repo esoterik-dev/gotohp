@@ -616,7 +616,7 @@ func uploadSingleFile(ctx context.Context, api uploadAPI, file preparedFile, opt
 	filePath := file.source
 	fileName := filepath.Base(filePath)
 	mediakey := ""
-	if err := file.unchanged(); err != nil {
+	if err := file.uploadable(); err != nil {
 		return "", false, err
 	}
 

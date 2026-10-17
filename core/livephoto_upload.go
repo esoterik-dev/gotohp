@@ -34,7 +34,7 @@ func uploadLivePhotoWithCallback(
 	reporter UploadReporter,
 ) (mediaKey string, skipped bool, err error) {
 	for _, file := range []preparedFile{photo, video} {
-		if err := file.unchanged(); err != nil {
+		if err := file.uploadable(); err != nil {
 			return "", false, err
 		}
 	}
