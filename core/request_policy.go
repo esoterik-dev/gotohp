@@ -14,11 +14,13 @@ import (
 	"time"
 )
 
-// Defaults for NewRequestPolicy. An Api without a policy keeps the historical
-// behaviour: DefaultRetryConfig retries, 429 retried, and no pacing.
+// Defaults for NewRequestPolicy. Requests are not paced by default: the run
+// goes as fast as its workers allow, and only a 429 slows it down, by pausing
+// every request until the server's Retry-After. An Api without a policy gets
+// DefaultRetryConfig retries, 429 retried, no pacing and no shared pause.
 const (
 	DefaultMaxRetries        = 3
-	DefaultRequestsPerMinute = 360
+	DefaultRequestsPerMinute = 0
 )
 
 // RequestPolicy paces Photos RPCs and shares 429 cooldowns between every Api
@@ -50,6 +52,9 @@ func NewRequestPolicy(maxRetries int, retry429 bool, requestsPerMinute int) (*Re
 	return p, nil
 }
 
+// cooldownJitter spreads requests that waited out a 429 pause.
+const cooldownJitter = 2 * time.Second
+
 // wait blocks until a request may be sent: after any 429 cooldown and, for
 // Photos RPCs, after the pacing interval.
 func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
@@ -64,6 +69,11 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 			ready = p.next
 		}
 		delay := ready.Sub(now)
+		if delay > 0 && ready.Equal(p.cooldown) {
+			// Without pacing, every waiting worker would retry the moment the
+			// pause ends and trip the quota again. Spread them out a little.
+			delay += time.Duration(rand.Int63n(int64(cooldownJitter)))
+		}
 		if delay <= 0 {
 			if rpc && p.interval > 0 {
 				p.next = now.Add(p.interval)

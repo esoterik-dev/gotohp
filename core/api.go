@@ -52,8 +52,9 @@ type ApiOptions struct {
 	Proxy    string
 	Saver    bool
 	UseQuota bool
-	// Policy paces requests and shares 429 cooldowns; nil keeps the
-	// historical behaviour (no pacing, default retries).
+	// Policy paces requests and shares 429 cooldowns. nil means no pacing,
+	// no shared cooldown and default retries; typed retry rules and the
+	// "fail the file when the duplicate check fails" rule apply either way.
 	Policy *RequestPolicy
 }
 
@@ -126,7 +127,9 @@ func newAPIFromCredential(credentials string, proxy string) (*Api, error) {
 	return api, nil
 }
 
-func (a *Api) BearerToken() (string, error) {
+// BearerToken returns a valid token, refreshing it when expired. ctx bounds
+// the refresh, including any shared 429 pause it waits behind.
+func (a *Api) BearerToken(ctx context.Context) (string, error) {
 	expiryStr := a.authResponseCache["Expiry"]
 	expiry, err := strconv.ParseInt(expiryStr, 10, 64)
 	if err != nil {
@@ -134,7 +137,7 @@ func (a *Api) BearerToken() (string, error) {
 	}
 
 	if expiry <= time.Now().Unix() {
-		resp, err := a.getAuthToken()
+		resp, err := a.getAuthToken(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get auth token: %w", err)
 		}
@@ -148,7 +151,7 @@ func (a *Api) BearerToken() (string, error) {
 	return "", errors.New("auth response does not contain bearer token")
 }
 
-func (a *Api) getAuthToken() (map[string]string, error) {
+func (a *Api) getAuthToken(ctx context.Context) (map[string]string, error) {
 	authDataValues, err := url.ParseQuery(a.authData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse auth data: %w", err)
@@ -183,7 +186,8 @@ func (a *Api) getAuthToken() (map[string]string, error) {
 		"User-Agent":      "GoogleAuth/1.4 (Pixel XL PQ2A.190205.001); gzip",
 	}
 
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		"https://android.googleapis.com/auth",
 		strings.NewReader(authRequestData.Encode()),
@@ -259,7 +263,7 @@ func (a *Api) GetUploadToken(ctx context.Context, shaHashB64 string, fileSize in
 	}
 
 	// Get the bearer token
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get bearer token: %w", err)
 	}
@@ -346,7 +350,7 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, 
 	}
 
 	// Get the bearer token
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get bearer token: %w", err)
 	}
@@ -490,7 +494,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 	// transfer encoding so it receives the request body it expects.
 	req.ContentLength = fileSize
 
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return ScottyFinalizeToken{}, fmt.Errorf("failed to get bearer token: %w", err)
 	}
@@ -578,7 +582,9 @@ func (a *Api) CommitUpload(
 		return "", fmt.Errorf("failed to marshal protobuf: %w", err)
 	}
 
-	return a.commitSerialized(ctx, serializedData)
+	return a.commitSerialized(ctx, serializedData, func(ctx context.Context) string {
+		return a.findLanded(ctx, sha1Hash)
+	})
 }
 
 func (a *Api) CommitLivePhoto(ctx context.Context, input LivePhotoCreateRequest) (string, error) {
@@ -586,7 +592,11 @@ func (a *Api) CommitLivePhoto(ctx context.Context, input LivePhotoCreateRequest)
 	if err != nil {
 		return "", fmt.Errorf("build Live Photo create request: %w", err)
 	}
-	return a.commitSerialized(ctx, serializedData)
+	// A new pair is only created when neither component was in the library,
+	// so the still appearing means this commit landed.
+	return a.commitSerialized(ctx, serializedData, func(ctx context.Context) string {
+		return a.findLanded(ctx, input.PhotoSHA1)
+	})
 }
 
 func (a *Api) ReconcileLivePhoto(ctx context.Context, input LivePhotoReconcileRequest) (string, error) {
@@ -594,35 +604,63 @@ func (a *Api) ReconcileLivePhoto(ctx context.Context, input LivePhotoReconcileRe
 	if err != nil {
 		return "", fmt.Errorf("build Live Photo reconcile request: %w", err)
 	}
-	return a.commitSerialized(ctx, serializedData)
+	// The still existed before, so a lookup cannot tell whether this landed.
+	return a.commitSerialized(ctx, serializedData, nil)
 }
 
-func (a *Api) commitSerialized(ctx context.Context, serializedData []byte) (string, error) {
+// findLanded looks hash up after a failed commit and returns its media key if
+// the item is in the library anyway. Lookup errors count as "not found".
+func (a *Api) findLanded(ctx context.Context, hash []byte) string {
+	key, err := a.FindRemoteMediaByHash(ctx, hash)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+// commitSerialized sends a create request, retrying as the policy allows.
+// A failed commit (a 429 or 5xx, say) may still have created the item, so
+// when landed is set it is asked before each retry and after the last
+// failure; a key it returns is the commit's result. That avoids reporting a
+// stored item as failed, and avoids creating it twice.
+func (a *Api) commitSerialized(ctx context.Context, serializedData []byte, landed func(context.Context) string) (string, error) {
 	retryConfig := a.retryConfig()
 	if a.commitRetryConfig != nil {
 		retryConfig = *a.commitRetryConfig
 	}
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
 			if err := waitRequest(ctx, CalculateBackoff(attempt-1, retryConfig)); err != nil {
 				return "", err
 			}
+			if landed != nil {
+				if key := landed(ctx); key != "" {
+					return key, nil
+				}
+			}
 		}
 		mediaKey, retryable, err := a.doCommitRequest(ctx, serializedData)
+		attempts++
 		if err == nil {
 			return mediaKey, nil
 		}
 		lastErr = err
 		if !retryable {
-			return "", fmt.Errorf("commit failed after %d attempt(s): %w", attempt+1, lastErr)
+			break
 		}
 	}
-	return "", fmt.Errorf("commit failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
+	if landed != nil && ctx.Err() == nil {
+		if key := landed(ctx); key != "" {
+			return key, nil
+		}
+	}
+	return "", fmt.Errorf("commit failed after %d attempt(s): %w", attempts, lastErr)
 }
 
 func (a *Api) doCommitRequest(ctx context.Context, serializedData []byte) (mediaKey string, retryable bool, err error) {
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return "", true, fmt.Errorf("failed to get bearer token: %w", err)
 	}
@@ -726,7 +764,7 @@ func (a *Api) CreateAlbum(ctx context.Context, albumName string, mediaKeys []str
 	}
 
 	// Get the bearer token
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get bearer token: %w", err)
 	}
@@ -817,7 +855,7 @@ func (a *Api) AddMediaToAlbum(ctx context.Context, albumMediaKey string, mediaKe
 	}
 
 	// Get the bearer token
-	bearerToken, err := a.BearerToken()
+	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get bearer token: %w", err)
 	}
