@@ -3,40 +3,46 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/pflag"
-	"path/filepath"
 )
 
-func validateReportPaths(f *pflag.FlagSet) error {
+// reportInputFlags names the flags whose files --report-file must never replace.
+var reportInputFlags = []string{"config"}
+
+// validateReportFile rejects a --report-file that would overwrite an input
+// file, and checks that its directory is writable before any upload starts.
+func validateReportFile(f *pflag.FlagSet) error {
 	output, _ := f.GetString("report-file")
 	if output == "" {
 		return nil
 	}
-	for _, name := range []string{"state-file", "retry-report", "config"} {
+	for _, name := range reportInputFlags {
 		input, _ := f.GetString(name)
-		if input == "" {
-			continue
-		}
-		paths := []string{input}
-		if name == "state-file" {
-			paths = append(paths, input+".lock")
-		}
-		for _, path := range paths {
-			outAbs, _ := filepath.Abs(output)
-			inAbs, _ := filepath.Abs(path)
-			same := outAbs == inAbs
-			outInfo, outErr := os.Stat(output)
-			inInfo, inErr := os.Stat(path)
-			if outErr == nil && inErr == nil {
-				same = same || os.SameFile(outInfo, inInfo)
-			}
-			if same {
-				return fmt.Errorf("--report-file must not overwrite --%s or its lock", name)
-			}
+		if input != "" && samePath(output, input) {
+			return fmt.Errorf("--report-file must not overwrite --%s", name)
 		}
 	}
-	return nil
+	probe, err := os.CreateTemp(filepath.Dir(output), ".gotohp-report-*")
+	if err != nil {
+		return fmt.Errorf("--report-file directory is not writable: %w", err)
+	}
+	_ = probe.Close()
+	return os.Remove(probe.Name())
+}
+
+// samePath reports whether two paths name the same file, either lexically or
+// through a link to an existing file.
+func samePath(a, b string) bool {
+	aAbs, aErr := filepath.Abs(a)
+	bAbs, bErr := filepath.Abs(b)
+	if aErr == nil && bErr == nil && aAbs == bAbs {
+		return true
+	}
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
 }
 
 func writeUploadReport(path string, data []byte) error {

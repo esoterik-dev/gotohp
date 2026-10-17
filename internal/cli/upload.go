@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -409,30 +410,31 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	}
 
 	if m, ok := finalModel.(uploadModel); ok {
-		return finishUploadWithReport(m, os.Stdout, settings.reportFile)
+		return finishUpload(m, os.Stdout, settings.reportFile)
 	}
 
 	return nil
 }
 
-// finishUpload writes the complete result before reporting a failed run.
-func finishUpload(model uploadModel, output io.Writer) error {
-	return finishUploadWithReport(model, output, "")
-}
-
-func finishUploadWithReport(model uploadModel, output io.Writer, reportFile string) error {
+// finishUpload writes the complete result before reporting a failed run. The
+// report file is the durable record, so it is written even if stdout fails.
+func finishUpload(model uploadModel, output io.Writer, reportFile string) error {
 	jsonOutput, err := json.MarshalIndent(buildUploadSummary(model), "", "  ")
 	if err != nil {
 		return fmt.Errorf("error generating JSON: %w", err)
 	}
 	jsonOutput = append(jsonOutput, '\n')
-	if _, err := output.Write(jsonOutput); err != nil {
-		return fmt.Errorf("error writing JSON: %w", err)
-	}
+	var reportErr, outputErr error
 	if reportFile != "" {
 		if err := writeUploadReport(reportFile, jsonOutput); err != nil {
-			return fmt.Errorf("error writing JSON report %q: %w", reportFile, err)
+			reportErr = fmt.Errorf("error writing JSON report %q: %w", reportFile, err)
 		}
+	}
+	if _, err := output.Write(jsonOutput); err != nil {
+		outputErr = fmt.Errorf("error writing JSON: %w", err)
+	}
+	if err := errors.Join(reportErr, outputErr); err != nil {
+		return err
 	}
 	if model.failed > 0 || model.albumError != "" {
 		return exitError{code: 1}

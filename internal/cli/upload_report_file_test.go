@@ -8,33 +8,45 @@ import (
 )
 
 func TestReportDoesNotOverwriteInputs(t *testing.T) {
-	for _, name := range []string{"state-file", "retry-report", "config"} {
+	for _, name := range reportInputFlags {
 		t.Run(name, func(t *testing.T) {
-			cmd := newUploadCommand()
-			f := cmd.Flags()
-			if f.Lookup(name) == nil {
-				f.String(name, "", "")
+			cmd := newRootCommand(Info{})
+			upload, _, err := cmd.Find([]string{"upload"})
+			if err != nil {
+				t.Fatal(err)
 			}
+			f := upload.Flags()
+			f.AddFlagSet(cmd.PersistentFlags())
 			path := filepath.Join(t.TempDir(), "input.json")
 			if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			_ = f.Set(name, path)
 			_ = f.Set("report-file", path)
-			if err := validateReportPaths(f); err == nil {
+			if err := validateReportFile(f); err == nil {
 				t.Fatal("allowed overwriting input")
 			}
 			_ = f.Set("report-file", path+".new")
-			if err := validateReportPaths(f); err != nil {
+			if err := validateReportFile(f); err != nil {
 				t.Fatal(err)
 			}
-			if name == "state-file" {
-				_ = f.Set("report-file", path+".lock")
-				if err := validateReportPaths(f); err == nil {
-					t.Fatal("allowed overwriting lock")
-				}
-			}
 		})
+	}
+}
+
+func TestReportDirectoryCheckedBeforeUpload(t *testing.T) {
+	f := newUploadCommand().Flags()
+	dir := t.TempDir()
+	_ = f.Set("report-file", filepath.Join(dir, "missing", "report.json"))
+	if err := validateReportFile(f); err == nil {
+		t.Fatal("accepted a report path in a missing directory")
+	}
+	_ = f.Set("report-file", filepath.Join(dir, "report.json"))
+	if err := validateReportFile(f); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("writability probe left files behind: %v", entries)
 	}
 }
 
