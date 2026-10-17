@@ -50,6 +50,18 @@ type preflightWarningMsg struct {
 
 type uploadCompleteMsg struct{}
 
+// cancelMsg asks the run to stop. The first one drains in-flight work so the
+// report stays complete; a second one quits immediately with what has finished.
+type cancelMsg struct {
+	exitCode int
+}
+
+// Exit codes follow the shell convention of 128 plus the signal number.
+const (
+	exitCodeInterrupt = 130 // SIGINT
+	exitCodeTerminate = 143 // SIGTERM
+)
+
 // Album messages
 type albumProgressMsg struct {
 	albumName  string
@@ -82,6 +94,9 @@ type uploadModel struct {
 	width        int
 	quitting     bool
 	canceled     bool
+	forceQuit    bool
+	cancelExit   int
+	busy         map[int]bool // workerID -> currently processing an item
 	cancel       func()
 	// Album state
 	albumName       string
@@ -132,6 +147,7 @@ func initialModel() uploadModel {
 		progress:     progress.New(progress.WithDefaultGradient()),
 		currentFiles: make(map[int]string),
 		workers:      make(map[int]string),
+		busy:         make(map[int]bool),
 		results:      []uploadResult{},
 		warnings:     []uploadWarning{},
 		width:        80,
@@ -158,6 +174,7 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fileProgressMsg:
 		m.workers[msg.workerID] = fmt.Sprintf("[%d] %s: %s", msg.workerID, msg.status, msg.fileName)
+		m.busy[msg.workerID] = msg.status != "idle" && msg.status != "error"
 		if msg.fileName != "" {
 			m.currentFiles[msg.workerID] = msg.fileName
 		}
@@ -217,17 +234,42 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.albumError = msg.error
 		return m, nil
 
+	case cancelMsg:
+		return m.requestCancel(msg.exitCode)
+
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
-			m.canceled = true
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, nil // Drain worker results before writing the final report.
+			return m.requestCancel(exitCodeInterrupt)
 		}
 	}
 
 	return m, nil
+}
+
+// requestCancel drains in-flight work on the first request and quits
+// immediately on the second, keeping whatever results have arrived.
+func (m uploadModel) requestCancel(exitCode int) (tea.Model, tea.Cmd) {
+	if m.canceled {
+		m.forceQuit = true
+		m.quitting = true
+		return m, tea.Quit
+	}
+	m.canceled = true
+	m.cancelExit = exitCode
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return m, nil // Drain worker results before writing the final report.
+}
+
+func (m uploadModel) busyWorkers() int {
+	n := 0
+	for _, busy := range m.busy {
+		if busy {
+			n++
+		}
+	}
+	return n
 }
 
 func (m uploadModel) View() string {
@@ -240,6 +282,13 @@ func (m uploadModel) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
 	b.WriteString(titleStyle.Render("Uploading to Google Photos"))
 	b.WriteString("\n\n")
+
+	if m.canceled {
+		cancelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+		b.WriteString(cancelStyle.Render(fmt.Sprintf(
+			"Canceling, waiting for %d worker(s). Press Ctrl+C again to force quit.", m.busyWorkers())))
+		b.WriteString("\n\n")
+	}
 
 	// Progress bar
 	if m.totalFiles > 0 {
@@ -413,18 +462,13 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	model.cancel = func() { uploadManager.Cancel() }
 	p := tea.NewProgram(model, programOptions...)
 	uploadManager = core.NewUploadManager(teaReporter{p: p}, newLogger(parseLogLevel(settings.logLevel)))
-	signals := make(chan os.Signal, 1)
+	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	done := make(chan struct{})
 	defer close(done)
-	go func() {
-		select {
-		case <-signals:
-			p.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
-		case <-done:
-		}
-	}()
+	useTUI := shouldUseTUI(settings)
+	go forwardSignals(p, signals, done, useTUI)
 	go uploadManager.Upload(paths, opts)
 
 	// Run until the upload manager reports UploadStop.
@@ -439,6 +483,26 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	}
 
 	return nil
+}
+
+// forwardSignals turns SIGINT and SIGTERM into cancel requests until done is
+// closed. Without the TUI there is no cancel banner, so it explains on stderr.
+func forwardSignals(p *tea.Program, signals <-chan os.Signal, done <-chan struct{}, useTUI bool) {
+	for first := true; ; first = false {
+		select {
+		case sig := <-signals:
+			exitCode := exitCodeInterrupt
+			if sig == syscall.SIGTERM {
+				exitCode = exitCodeTerminate
+			}
+			if first && !useTUI {
+				fmt.Fprintln(os.Stderr, "Canceling: waiting for in-progress uploads. Send the signal again to force quit.")
+			}
+			p.Send(cancelMsg{exitCode: exitCode})
+		case <-done:
+			return
+		}
+	}
 }
 
 // finishUpload writes the complete result before reporting a failed run. The
@@ -462,7 +526,7 @@ func finishUpload(model uploadModel, output io.Writer, reportFile string) error 
 		return err
 	}
 	if model.canceled {
-		return exitError{code: 130}
+		return exitError{code: model.cancelExit}
 	}
 	if model.failed > 0 || model.albumError != "" {
 		return exitError{code: 1}
