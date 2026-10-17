@@ -23,6 +23,8 @@ Download the `gotohp-cli` release artifact for your platform. It runs without th
 
 ```shell
 gotohp-cli upload /path/to/photos --recursive --threads 5
+# Hash quickly without issuing eight concurrent network operations:
+gotohp-cli upload /path/to/photos --recursive --hash-threads 8 --upload-threads 2
 gotohp-cli upload /path/to/photos --recursive --report-file upload-report.json
 gotohp-cli creds add "<oauth_token cookie value>"   # Embedded Setup sign-in, see below
 gotohp-cli creds add "androidId=..."                 # or a raw credential string
@@ -41,6 +43,8 @@ The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files fin
 Requests are not paced by default: workers go as fast as they can. HTTP 429 responses pause the whole run, honoring `Retry-After` or waiting at least one minute when absent, then workers resume spread over about two seconds and retry the same request. A commit that failed is looked up in the library before it is retried or reported, since a 429 or 5xx can arrive after the item was stored. `--retry-429=false` disables 429 retries; `--max-retries 0` disables all request retries. The default is three retries after the initial attempt, independently for each operation. A failed duplicate check fails the file instead of uploading it, so it can be retried without risking a duplicate. `--requests-per-minute N` adds a cap shared by all workers, if you prefer to stay below the quota rather than react to it. Separate CLI processes do not share limits or pauses. The GUI does not pace requests or share pauses, but follows the same retry rules and also fails a file whose duplicate check fails.
 
 For a report containing Apple Live Photo pairs, `gotohp-cli verify-live-photos upload-report.json --threads 1 --report-file verification.json` compares both local hashes with remote metadata, without downloading media. Files are read from the paths in the report; if they have moved, `--source-root /path/to/DCIM` finds each by name under the new root and reports names it cannot tell apart as ambiguous. Unresolved pairs return a nonzero exit status, and Ctrl+C writes a partial report. It takes the same `--max-retries`, `--retry-429` and `--requests-per-minute` flags as `upload`, and a 429 pauses all its workers. This checks shared remote keys, not playback; spot-check important pairs in Google Photos.
+
+`--threads N` remains shorthand for both worker counts. Explicit `--hash-threads` and `--upload-threads` override it independently. Hash workers also make the `--stage-local` copies. A bounded queue connects hashing to the network stage, which handles duplicate lookups, upload sessions, and commits. Thread counts do not replace API rate limiting. Files changed after hashing are rejected; rerun them after the source is stable.
 
 Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
 
