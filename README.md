@@ -36,7 +36,7 @@ The CLI shares the config file with the GUI, but reads only the stored credentia
 
 The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files finish, then writes the report and exits with status 130 (143 for SIGTERM). Albums are still created for the files that finished. A second Ctrl+C aborts in-progress files and quits at once, keeping the results that already arrived. It creates no album, so files that finished are not added to `--album`; the report says so.
 
-`--stage-local` copies each upload item to local temporary storage before hashing and uploading. Use it for FUSE, device, or unstable mounts; temporary copies are removed when the item finishes. Copies go to `$TMPDIR` (default `/tmp`), which is RAM-backed tmpfs on many Linux distributions, so with several threads and large videos point it at a disk, e.g. `TMPDIR=/var/tmp gotohp-cli upload --stage-local ...`. With `--delete`, a source that changed after it was staged is kept.
+`--stage-local` copies each upload item to local temporary storage before hashing and uploading. Use it for FUSE, device, or unstable mounts; temporary copies are removed when the item finishes, and on a force quit (second Ctrl+C). Copies go to `$TMPDIR` (default `/tmp`), which is RAM-backed tmpfs on many Linux distributions, so with several threads and large videos point it at a disk, e.g. `TMPDIR=/var/tmp gotohp-cli upload --stage-local ...`. With `--delete`, a source that changed after it was staged is kept.
 
 Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
 

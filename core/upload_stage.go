@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 const uploadStageBufferSize = 1 * 1024 * 1024
@@ -44,6 +45,7 @@ func stageFilesLocally(ctx context.Context, sourcePaths []string) (*stagedFiles,
 	if err != nil {
 		return nil, fmt.Errorf("create local upload staging directory: %w", err)
 	}
+	liveStageDirs.Store(stageDir, struct{}{})
 	staged := &stagedFiles{sources: sourcePaths, dir: stageDir}
 	for index, sourcePath := range sourcePaths {
 		stagedPath := filepath.Join(stageDir, fmt.Sprintf("%d-%s", index, filepath.Base(sourcePath)))
@@ -61,7 +63,22 @@ func stageFilesLocally(ctx context.Context, sourcePaths []string) (*stagedFiles,
 func (s *stagedFiles) cleanup() {
 	if s != nil {
 		_ = os.RemoveAll(s.dir)
+		liveStageDirs.Delete(s.dir)
 	}
+}
+
+// liveStageDirs holds every staging directory not yet cleaned up.
+var liveStageDirs sync.Map
+
+// RemoveStagedFiles deletes every staging directory still in use. Call it
+// when the process exits without waiting for its uploads (a force quit),
+// since their deferred cleanup will never run.
+func RemoveStagedFiles() {
+	liveStageDirs.Range(func(dir, _ any) bool {
+		_ = os.RemoveAll(dir.(string))
+		liveStageDirs.Delete(dir)
+		return true
+	})
 }
 
 // verifySourcesUnchanged fails if any source was replaced or modified since
