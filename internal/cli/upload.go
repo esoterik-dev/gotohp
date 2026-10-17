@@ -489,6 +489,10 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	}
 
 	if m, ok := finalModel.(uploadModel); ok {
+		if m.forceQuit {
+			// Workers are abandoned mid-item, so their temporary copies would leak.
+			core.RemoveStagedFiles()
+		}
 		return finishUpload(m, os.Stdout, settings.reportFile)
 	}
 

@@ -84,3 +84,19 @@ func TestRemoveUploadedSourceWithoutStaging(t *testing.T) {
 		t.Fatalf("source not deleted: %v", err)
 	}
 }
+
+func TestRemoveStagedFilesDeletesLiveCopies(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "a.jpg")
+	if err := os.WriteFile(src, []byte("a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stageFilesLocally(context.Background(), []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	RemoveStagedFiles()
+	if _, err := os.Stat(staged.dir); !os.IsNotExist(err) {
+		t.Fatalf("staging dir left behind: %v", err)
+	}
+	staged.cleanup() // still safe afterwards
+}
