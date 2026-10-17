@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"app/core"
 )
 
 func TestReportDoesNotOverwriteInputs(t *testing.T) {
@@ -31,6 +33,21 @@ func TestReportDoesNotOverwriteInputs(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestReportDoesNotOverwriteDefaultConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gotohp.config")
+	if err := os.WriteFile(path, []byte("credentials"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	saved := core.ConfigPath
+	core.ConfigPath = path // resolved by LoadConfig without --config
+	t.Cleanup(func() { core.ConfigPath = saved })
+	f := newUploadCommand().Flags()
+	_ = f.Set("report-file", path)
+	if err := validateReportFile(f); err == nil {
+		t.Fatal("allowed overwriting the default config")
 	}
 }
 

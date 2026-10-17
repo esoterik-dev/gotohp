@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"app/core"
+
 	"github.com/spf13/pflag"
 )
 
@@ -23,6 +25,10 @@ func validateReportFile(f *pflag.FlagSet) error {
 		if input != "" && samePath(output, input) {
 			return fmt.Errorf("--report-file must not overwrite --%s", name)
 		}
+	}
+	// The config in use may come from a default location rather than --config.
+	if core.ConfigPath != "" && samePath(output, core.ConfigPath) {
+		return fmt.Errorf("--report-file must not overwrite the config file %s", core.ConfigPath)
 	}
 	probe, err := os.CreateTemp(filepath.Dir(output), ".gotohp-report-*")
 	if err != nil {
