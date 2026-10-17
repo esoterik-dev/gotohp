@@ -69,9 +69,17 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 		if err != nil {
 			return err
 		}
+		paths = existingRetryPaths(paths, cmd.ErrOrStderr())
 		if len(paths) == 0 {
 			fmt.Fprintln(cmd.ErrOrStderr(), "No failed non-skipped files to retry")
-			return nil
+			// Still write the (empty) summary, so --report-file is never stale.
+			if err := validateReportFile(cmd.Flags()); err != nil {
+				return err
+			}
+			model := initialModel()
+			model.workingDir, _ = os.Getwd()
+			reportFile, _ := cmd.Flags().GetString("report-file")
+			return finishUpload(model, cmd.OutOrStdout(), reportFile)
 		}
 	}
 	for _, path := range paths {

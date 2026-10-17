@@ -59,9 +59,12 @@ func retryReportPaths(path string, pairLivePhotos bool, warn io.Writer) ([]strin
 	if results == nil {
 		return nil, fmt.Errorf("retry report must contain a results array")
 	}
+	if report.Canceled && report.Total == 0 && len(results) == 0 {
+		return nil, fmt.Errorf("the report is from a run canceled before any file started; rerun the original sources instead")
+	}
 	if missing := report.Total - len(results); missing > 0 {
 		if !report.Canceled {
-			return nil, fmt.Errorf("incomplete report lacks source paths; rerun original sources with upload state instead")
+			return nil, fmt.Errorf("incomplete report lacks source paths; rerun the original sources instead")
 		}
 		fmt.Fprintf(warn, "Warning: the report is from a canceled run; %d item(s) that never started are not retried. Rerun the original sources to include them.\n", missing)
 	}
@@ -98,4 +101,18 @@ func retryReportPaths(path string, pairLivePhotos bool, warn io.Writer) ([]strin
 		return nil, fmt.Errorf("report contains only album failures; file retries cannot repair album work")
 	}
 	return paths, nil
+}
+
+// existingRetryPaths drops retry paths that no longer exist, warning about
+// each, so one moved file does not block retrying the others.
+func existingRetryPaths(paths []string, warn io.Writer) []string {
+	kept := paths[:0:0]
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			fmt.Fprintf(warn, "Warning: not retrying %q: %v\n", path, err)
+			continue
+		}
+		kept = append(kept, path)
+	}
+	return kept
 }

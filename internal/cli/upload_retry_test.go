@@ -114,3 +114,40 @@ func TestRetryReportArgs(t *testing.T) {
 func quoteJSON(s string) string {
 	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
 }
+
+func TestRetryReportRejectsRunCanceledBeforeStart(t *testing.T) {
+	path := writeRetryReport(t, `{"canceled":true,"total":0,"results":[]}`)
+	if _, err := retryReportPaths(path, false, io.Discard); err == nil {
+		t.Fatal("a run canceled during scanning looked like nothing to retry")
+	}
+}
+
+func TestRetrySkipsMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	kept := filepath.Join(dir, "kept.jpg")
+	if err := os.WriteFile(kept, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var warn bytes.Buffer
+	got := existingRetryPaths([]string{filepath.Join(dir, "moved.jpg"), kept}, &warn)
+	if !reflect.DeepEqual(got, []string{kept}) || !strings.Contains(warn.String(), "moved.jpg") {
+		t.Fatalf("got %v, warning %q", got, warn.String())
+	}
+}
+
+func TestEmptyRetryStillWritesReport(t *testing.T) {
+	dir := t.TempDir()
+	retry := writeRetryReport(t, `{"results":[{"path":"ok.jpg","success":true}]}`)
+	out := filepath.Join(dir, "retry-report.json")
+	cmd := newRootCommand(Info{})
+	cmd.SetArgs([]string{"upload", "--retry-report", retry, "--report-file", out})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil || !strings.Contains(string(data), `"total": 0`) {
+		t.Fatalf("report not written: %v %s", err, data)
+	}
+}

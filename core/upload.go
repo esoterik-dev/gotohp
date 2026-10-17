@@ -215,7 +215,9 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 				IsError:      true,
 				Error:        err,
 				ErrorMessage: err.Error(),
+				IsLivePhoto:  item.Kind == UploadWorkLivePhoto,
 				Path:         path,
+				Paths:        uploadWorkPaths(item),
 			})
 		}
 		m.finish()
