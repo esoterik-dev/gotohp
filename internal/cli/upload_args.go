@@ -47,6 +47,7 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("update-existing-photos-to-live", false, "attach matching MOV files to existing photos")
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
 	f.StringP("log-level", "l", "info", "stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error")
+	f.String("log-file", "", "write the run's debug log to PATH (default: a new file in ~/.local/state/gotohp/logs)")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
 	f.String("state-file", "", "read confirmed upload state from PATH")
 	f.Bool("update-state", false, "checkpoint confirmed uploads to --state-file")
@@ -64,8 +65,10 @@ func newUploadCommand() *cobra.Command {
 // uploadRunSettings holds CLI-only settings that are not part of UploadOptions.
 type uploadRunSettings struct {
 	logLevel   string
+	logFile    string // "" means a new file at defaultRunLogPath
 	noTUI      bool
 	reportFile string
+	version    string
 }
 
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
@@ -121,10 +124,13 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	}
 	noTUI, _ := f.GetBool("no-tui")
 	reportFile, _ := f.GetString("report-file")
+	logFile, _ := f.GetString("log-file")
 	return runUpload(paths, opts, uploadRunSettings{
 		logLevel:   logLevel,
+		logFile:    logFile,
 		noTUI:      noTUI,
 		reportFile: reportFile,
+		version:    cmd.Root().Version,
 	})
 }
 
