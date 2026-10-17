@@ -11,7 +11,7 @@ import (
 )
 
 // reportInputFlags names the flags whose files --report-file must never replace.
-var reportInputFlags = []string{"config"}
+var reportInputFlags = []string{"config", "retry-report"}
 
 // validateReportFile rejects a --report-file that would overwrite an input
 // file, and checks that its directory is writable before any upload starts.

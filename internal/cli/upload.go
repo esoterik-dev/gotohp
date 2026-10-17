@@ -100,6 +100,7 @@ type uploadModel struct {
 	busy         map[int]bool // workerID -> currently processing an item
 	stop         func()       // finish in-flight files, start no new ones
 	cancel       func()       // abort in-flight files
+	workingDir   string
 	// Album state
 	albumName       string
 	albumItemsAdded int
@@ -134,14 +135,16 @@ type albumSummary struct {
 }
 
 type uploadSummary struct {
-	Canceled  bool            `json:"canceled,omitempty"`
-	Total     int             `json:"total"`
-	Succeeded int             `json:"succeeded"`
-	Failed    int             `json:"failed"`
-	Skipped   int             `json:"skipped"`
-	Results   []uploadResult  `json:"results"`
-	Warnings  []uploadWarning `json:"warnings,omitempty"`
-	Album     *albumSummary   `json:"album,omitempty"`
+	// WorkingDirectory lets --retry-report resolve relative result paths.
+	WorkingDirectory string          `json:"workingDirectory,omitempty"`
+	Canceled         bool            `json:"canceled,omitempty"`
+	Total            int             `json:"total"`
+	Succeeded        int             `json:"succeeded"`
+	Failed           int             `json:"failed"`
+	Skipped          int             `json:"skipped"`
+	Results          []uploadResult  `json:"results"`
+	Warnings         []uploadWarning `json:"warnings,omitempty"`
+	Album            *albumSummary   `json:"album,omitempty"`
 }
 
 func initialModel() uploadModel {
@@ -455,6 +458,7 @@ func newLogger(level slog.Level) *slog.Logger {
 // summary when it completes.
 func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettings) error {
 	model := initialModel()
+	model.workingDir, _ = os.Getwd()
 	programOptions := []tea.ProgramOption{tea.WithoutSignalHandler()}
 	if !shouldUseTUI(settings) {
 		programOptions = append(
@@ -549,13 +553,14 @@ func buildUploadSummary(model uploadModel) uploadSummary {
 		warnings = append(warnings, warning)
 	}
 	summary := uploadSummary{
-		Canceled:  model.canceled,
-		Total:     model.totalFiles,
-		Succeeded: model.completed,
-		Failed:    model.failed,
-		Skipped:   model.skipped,
-		Results:   model.results,
-		Warnings:  warnings,
+		WorkingDirectory: model.workingDir,
+		Canceled:         model.canceled,
+		Total:            model.totalFiles,
+		Succeeded:        model.completed,
+		Failed:           model.failed,
+		Skipped:          model.skipped,
+		Results:          model.results,
+		Warnings:         warnings,
 	}
 	if model.albumName != "" {
 		summary.Album = &albumSummary{

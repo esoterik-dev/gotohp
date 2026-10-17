@@ -65,7 +65,7 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	if report, _ := cmd.Flags().GetString("retry-report"); report != "" {
 		var err error
 		pair, _ := cmd.Flags().GetBool("pair-live-photos")
-		paths, err = retryReportPaths(report, pair)
+		paths, err = retryReportPaths(report, pair, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
