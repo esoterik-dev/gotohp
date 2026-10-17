@@ -138,18 +138,26 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 // of being queued. The returned queue holds at most opts.UploadThreads
 // prepared items, so hashing runs only a little ahead of uploading. Every
 // started item yields exactly one preparedUpload or finish call, including
-// after cancellation; canceling ctx stops starting new items.
-func prepareUploads(ctx context.Context, items []UploadWorkItem, opts UploadOptions, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
+// after cancellation. Closing stop, or canceling ctx, stops starting new
+// items; canceling ctx also aborts hashing in progress.
+func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWorkItem, opts UploadOptions, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
 	jobs := make(chan UploadWorkItem)
 	ready := make(chan preparedUpload, opts.UploadThreads)
 	go func() {
 		defer close(jobs)
 		for _, item := range items {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			if ctx.Err() != nil {
 				return
 			}
 			select {
 			case jobs <- item:
+			case <-stop:
+				return
 			case <-ctx.Done():
 				return
 			}

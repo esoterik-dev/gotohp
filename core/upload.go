@@ -257,7 +257,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	// Hash workers also check for duplicates and finish items already in the
 	// library, so only real uploads wait for a network worker. They finish
 	// before workChan closes, so before the network workers and results do.
-	workChan := prepareUploads(prepareCtx, workItems, opts, checkApi, m.reporter, func(workerID int, p preparedUpload) {
+	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, checkApi, m.reporter, func(workerID int, p preparedUpload) {
 		m.finishPrepared(workerID, checkApi, nil, p, results, opts)
 	})
 
@@ -774,9 +774,14 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	if failure == nil {
 		failure = apiErr
 	}
+	// An item already found in the library needs no request, so a cancel
+	// does not turn its known result into a failure.
+	known := failure == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
 	select {
 	case <-cancel:
-		failure = context.Canceled
+		if !known {
+			failure = context.Canceled
+		}
 	default:
 	}
 	if failure != nil {
