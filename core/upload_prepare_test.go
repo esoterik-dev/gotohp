@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestWorkerCounts(t *testing.T) {
@@ -56,8 +58,8 @@ func TestCancelledPreparationStartsNothing(t *testing.T) {
 	for i := range items {
 		items[i] = UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: "missing.jpg"}}
 	}
-	ready := prepareUploads(ctx, nil, items, UploadOptions{HashThreads: 8, UploadThreads: 2}, nil, NopReporter{}, nil)
-	if cap(ready) != 2 {
+	ready := prepareUploads(ctx, nil, items, UploadOptions{HashThreads: 8, UploadThreads: 2, StageLocal: true}, nil, NopReporter{}, nil)
+	if cap(ready) != 2 { // staged copies keep the queue bounded
 		t.Fatalf("queue capacity=%d", cap(ready))
 	}
 	for p := range ready {
@@ -66,9 +68,11 @@ func TestCancelledPreparationStartsNothing(t *testing.T) {
 	}
 }
 
-func TestCancelMidRunReportsOnlyStartedItems(t *testing.T) {
-	dir := t.TempDir()
+// Without --stage-local, hash workers never wait for the upload side: all
+// items are hashed and handed off even if nothing reads the queue yet.
+func TestHashWorkersDoNotWaitForUploadWorkers(t *testing.T) {
 	items := make([]UploadWorkItem, 40)
+	dir := t.TempDir()
 	for i := range items {
 		path := filepath.Join(dir, fmt.Sprintf("%02d.jpg", i))
 		if err := os.WriteFile(path, []byte(path), 0600); err != nil {
@@ -76,20 +80,33 @@ func TestCancelMidRunReportsOnlyStartedItems(t *testing.T) {
 		}
 		items[i] = UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: path}}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ready := prepareUploads(ctx, nil, items, UploadOptions{HashThreads: 4, UploadThreads: 2}, nil, NopReporter{}, nil)
-	count := 0
-	for p := range ready {
-		count++
-		p.cleanup()
-		if count == 3 {
-			cancel()
+	reporter := &finishRecorder{}
+	ready := prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 4, UploadThreads: 1}, nil, reporter, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for reporter.finished.Load() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatal("hash workers waited for the upload side")
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	// At most the queue plus one item per hash worker was in flight.
-	if count < 3 || count > 3+2+4 {
-		t.Fatalf("got %d results after cancel", count)
+	count := 0
+	for range ready {
+		count++
+	}
+	if count != len(items) {
+		t.Fatalf("got %d items", count)
+	}
+}
+
+// finishRecorder counts hash workers that reported they are finished.
+type finishRecorder struct {
+	NopReporter
+	finished atomic.Int32
+}
+
+func (r *finishRecorder) ThreadStatus(s ThreadStatus) {
+	if s.Status == "idle" && s.Message == "Finished" {
+		r.finished.Add(1)
 	}
 }
 

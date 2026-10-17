@@ -743,9 +743,17 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, 
 	// Create API client once per worker for connection reuse
 	api, apiErr := m.newAPI(opts.Api)
 
-	// Drain the queue even after cancellation so every prepared item is
-	// cleaned up and gets a result.
+	// Drain the queue even after Stop or Cancel so every prepared item is
+	// cleaned up. Items still waiting for an upload worker then were never
+	// uploaded: they are dropped without a result, like files never started.
+	stop := m.getStopChan()
 	for prepared := range workChan {
+		select {
+		case <-stop:
+			prepared.cleanup()
+			continue
+		default:
+		}
 		m.finishPrepared(workerID, api, apiErr, prepared, results, opts)
 
 		// Mark as idle after completing file
