@@ -321,3 +321,26 @@ func TestUploadLeavesEveryWorkerIdle(t *testing.T) {
 }
 
 var _ uploadAPI = (*fakeLibrary)(nil)
+
+// README: --threads N alone runs N workers that each hash, check and upload
+// their own files (also what the GUI does); there is no second pool.
+func TestUploadThreadsAloneUsesOnePool(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 9)
+	lib := newFakeLibrary()
+	for _, p := range paths[:4] {
+		lib.add(t, p)
+	}
+	_, rec := startRun(lib, paths, UploadOptions{Threads: 3})
+	rec.wait(t)
+	if ok, skipped, failed := countResults(rec.results); ok != 5 || skipped != 4 || failed != 0 {
+		t.Fatalf("succeeded=%d skipped=%d failed=%d", ok, skipped, failed)
+	}
+	for _, s := range rec.statuses {
+		if s.WorkerID >= 3 {
+			t.Fatalf("worker %d exists; --threads 3 must run 3 workers", s.WorkerID)
+		}
+	}
+	if len(rec.workersWithStatus("uploading")) == 0 {
+		t.Fatal("no worker uploaded")
+	}
+}

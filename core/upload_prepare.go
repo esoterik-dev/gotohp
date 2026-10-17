@@ -130,7 +130,9 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 	return p
 }
 
-// prepareUploads hashes items on opts.HashThreads workers. With a non-nil
+// prepareUploads hashes items on opts.HashThreads workers. With
+// opts.UploadThreads 0 there is no upload pool: every item is passed to
+// finish on its hash worker, which uploads it. With a non-nil
 // finder, the same workers also run the duplicate check for single files, and
 // a file already in the library is passed to finish on that worker instead
 // of being queued. The returned queue holds at most opts.UploadThreads
@@ -163,11 +165,12 @@ func prepareUploads(ctx context.Context, items []UploadWorkItem, opts UploadOpti
 				prepared := prepareUpload(ctx, item, opts, workerID, reporter)
 				if finder != nil && prepared.err == nil && item.Kind == UploadWorkSingle && !opts.ForceUpload {
 					prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)
-					if prepared.err == nil && prepared.files[0].remoteKey != "" {
-						finish(workerID, prepared)
-						reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
-						continue
-					}
+				}
+				known := prepared.err == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
+				if known || opts.UploadThreads == 0 {
+					finish(workerID, prepared)
+					reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
+					continue
 				}
 				reporter.ThreadStatus(ThreadStatus{
 					WorkerID: workerID,

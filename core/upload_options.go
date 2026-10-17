@@ -9,10 +9,14 @@ type UploadOptions struct {
 	Recursive      bool
 	ExcludePattern string
 	Threads        int
-	// HashThreads and UploadThreads size the hashing and network worker
-	// pools; each defaults to Threads.
+	// HashThreads and UploadThreads split the work into two pools: hash
+	// workers hash, stage and check for duplicates, upload workers transfer
+	// and commit new files. When neither is set, Threads workers each handle
+	// a file from start to finish, as before the split (normalized then sets
+	// UploadThreads to 0). When one is set, the other defaults to Threads.
 	HashThreads                   int
 	UploadThreads                 int
+	onePool                       bool // set by normalized; keeps it idempotent
 	ForceUpload                   bool
 	DeleteFromHost                bool
 	DisableUnsupportedFilesFilter bool
@@ -61,11 +65,15 @@ func (o UploadOptions) normalized() UploadOptions {
 	if o.Threads < 1 {
 		o.Threads = 1
 	}
-	if o.HashThreads < 1 {
-		o.HashThreads = o.Threads
-	}
-	if o.UploadThreads < 1 {
-		o.UploadThreads = o.Threads
+	if o.onePool || (o.HashThreads < 1 && o.UploadThreads < 1) {
+		o.onePool, o.HashThreads, o.UploadThreads = true, o.Threads, 0
+	} else {
+		if o.HashThreads < 1 {
+			o.HashThreads = o.Threads
+		}
+		if o.UploadThreads < 1 {
+			o.UploadThreads = o.Threads
+		}
 	}
 	if o.AlbumAutoMode {
 		o.AlbumName = ""

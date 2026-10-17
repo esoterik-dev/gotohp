@@ -266,6 +266,16 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		m.wg.Add(1)
 		go m.runWorker(i, workChan, results, opts)
 	}
+	if numWorkers == 0 {
+		// One pool: hash workers finish every item themselves. workChan
+		// closes once they are done, and results must stay open until then.
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			for range workChan {
+			}
+		}()
+	}
 
 	// Handle results, wait for completion, and create album if configured
 	go func() {
