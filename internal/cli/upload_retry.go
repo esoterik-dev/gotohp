@@ -3,7 +3,9 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -19,36 +21,53 @@ func uploadArgs(cmd *cobra.Command, args []string) error {
 	return cobra.MinimumNArgs(1)(cmd, args)
 }
 
-func retryReportPaths(path string, pairLivePhotos bool) ([]string, error) {
+type retryReportResult struct {
+	Path    string   `json:"path"`
+	Paths   []string `json:"paths"`
+	Success bool     `json:"success"`
+	Skipped bool     `json:"skipped"`
+}
+
+// retryReportPaths returns the source paths of failed, non-skipped results.
+// Relative paths are resolved against the directory the original upload ran
+// in, which the report records; reports from older builds fall back to the
+// current directory. A canceled run is retried with a warning on warn, since
+// items that never started are not in its results.
+func retryReportPaths(path string, pairLivePhotos bool, warn io.Writer) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read retry report: %w", err)
 	}
 	var report struct {
-		Total    int  `json:"total"`
-		Canceled bool `json:"canceled"`
-		Results  *[]struct {
-			Path    string   `json:"path"`
-			Paths   []string `json:"paths"`
-			Success bool     `json:"success"`
-			Skipped bool     `json:"skipped"`
-		} `json:"results"`
-		Album *struct {
+		WorkingDirectory string          `json:"workingDirectory"`
+		Total            int             `json:"total"`
+		Canceled         bool            `json:"canceled"`
+		Results          json.RawMessage `json:"results"`
+		Album            *struct {
 			Error string `json:"error"`
 		} `json:"album"`
 	}
 	if err := json.Unmarshal(data, &report); err != nil {
 		return nil, fmt.Errorf("parse retry report: %w", err)
 	}
-	if report.Results == nil {
+	var results []retryReportResult
+	if len(report.Results) > 0 {
+		if err := json.Unmarshal(report.Results, &results); err != nil {
+			return nil, fmt.Errorf("parse retry report results: %w", err)
+		}
+	}
+	if results == nil {
 		return nil, fmt.Errorf("retry report must contain a results array")
 	}
-	if report.Total > len(*report.Results) || (report.Canceled && len(*report.Results) == 0) {
-		return nil, fmt.Errorf("incomplete report lacks source paths; rerun original sources with upload state instead")
+	if missing := report.Total - len(results); missing > 0 {
+		if !report.Canceled {
+			return nil, fmt.Errorf("incomplete report lacks source paths; rerun original sources with upload state instead")
+		}
+		fmt.Fprintf(warn, "Warning: the report is from a canceled run; %d item(s) that never started are not retried. Rerun the original sources to include them.\n", missing)
 	}
 	paths := []string{}
 	seen := make(map[string]bool)
-	for i, result := range *report.Results {
+	for i, result := range results {
 		if result.Success || result.Skipped {
 			continue
 		}
@@ -65,6 +84,9 @@ func retryReportPaths(path string, pairLivePhotos bool) ([]string, error) {
 		for _, file := range files {
 			if file == "" {
 				return nil, fmt.Errorf("failed result %d contains an empty source path", i)
+			}
+			if !filepath.IsAbs(file) && report.WorkingDirectory != "" {
+				file = filepath.Join(report.WorkingDirectory, file)
 			}
 			if !seen[file] {
 				paths = append(paths, file)
