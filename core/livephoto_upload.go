@@ -8,10 +8,10 @@ import (
 )
 
 type livePhotoUploadAPI interface {
-	FindRemoteMediaByHash(hash []byte) (string, error)
+	FindRemoteMediaByHash(ctx context.Context, hash []byte) (string, error)
 	UploadFileWithHashAndProgress(ctx context.Context, filePath string, sha1Hash []byte, fileSize int64, onProgress UploadProgressCallback) (ScottyFinalizeToken, error)
-	CommitLivePhoto(input LivePhotoCreateRequest) (string, error)
-	ReconcileLivePhoto(input LivePhotoReconcileRequest) (string, error)
+	CommitLivePhoto(ctx context.Context, input LivePhotoCreateRequest) (string, error)
+	ReconcileLivePhoto(ctx context.Context, input LivePhotoReconcileRequest) (string, error)
 }
 
 type LivePhotoUploadOptions struct {
@@ -84,8 +84,8 @@ func uploadLivePhotoWithCallback(
 		FileName: displayName,
 		Message:  "Checking both Live Photo components...",
 	})
-	photoRemoteKey, photoCheckErr := api.FindRemoteMediaByHash(photoSHA1)
-	videoRemoteKey, videoCheckErr := api.FindRemoteMediaByHash(videoSHA1)
+	photoRemoteKey, photoCheckErr := api.FindRemoteMediaByHash(ctx, photoSHA1)
+	videoRemoteKey, videoCheckErr := api.FindRemoteMediaByHash(ctx, videoSHA1)
 	if photoCheckErr != nil {
 		return "", false, fmt.Errorf("check Live Photo still deduplication: %w", photoCheckErr)
 	}
@@ -158,7 +158,7 @@ func uploadLivePhotoWithCallback(
 		FileName: displayName,
 		Message:  "Committing linked Live Photo...",
 	})
-	mediaKey, err = api.CommitLivePhoto(LivePhotoCreateRequest{
+	mediaKey, err = api.CommitLivePhoto(ctx, LivePhotoCreateRequest{
 		PhotoToken:       photoToken,
 		VideoToken:       videoToken,
 		FileName:         photoInfo.Name(),
@@ -237,7 +237,7 @@ func reconcileExistingLivePhoto(
 		FileName: displayName,
 		Message:  "Updating existing photo to Live...",
 	})
-	mediaKey, err := api.ReconcileLivePhoto(LivePhotoReconcileRequest{
+	mediaKey, err := api.ReconcileLivePhoto(ctx, LivePhotoReconcileRequest{
 		VideoToken:       videoToken,
 		FileName:         videoInfo.Name(),
 		PhotoSHA1:        photoSHA1,

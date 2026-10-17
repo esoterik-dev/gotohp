@@ -300,7 +300,7 @@ func validateGooglePhotosCredential(credential string, proxy string) error {
 		return err
 	}
 
-	mediaKey, err := api.FindRemoteMediaByHash(make([]byte, 20))
+	mediaKey, err := api.FindRemoteMediaByHash(context.Background(), make([]byte, 20))
 	if err != nil {
 		return err
 	}

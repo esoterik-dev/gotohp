@@ -30,7 +30,7 @@ func TestRemoteDuplicateIsSkippedWithItsMediaKey(t *testing.T) {
 	requests := 0
 	api := &Api{
 		authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
-		client: &http.Client{Transport: uploadRoundTrip(func(r *http.Request) (*http.Response, error) {
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			requests++
 			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(match))}, nil
 		})},

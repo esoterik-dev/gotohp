@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +32,7 @@ type Api struct {
 	language          string
 	authData          string
 	client            *http.Client
+	policy            *RequestPolicy
 	authResponseCache map[string]string
 	commitEndpoint    string
 	commitRetryConfig *RetryConfig
@@ -52,6 +52,9 @@ type ApiOptions struct {
 	Proxy    string
 	Saver    bool
 	UseQuota bool
+	// Policy paces requests and shares 429 cooldowns; nil keeps the
+	// historical behaviour (no pacing, default retries).
+	Policy *RequestPolicy
 }
 
 // NewApi creates a client for the account in opts using the loaded credential store.
@@ -84,6 +87,7 @@ func NewApi(opts ApiOptions) (*Api, error) {
 	}
 	api.saver = opts.Saver
 	api.useQuota = opts.UseQuota
+	api.policy = opts.Policy
 	return api, nil
 }
 
@@ -192,7 +196,7 @@ func (a *Api) getAuthToken() (map[string]string, error) {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("auth request failed after retries: %w", err)
 	}
@@ -238,7 +242,7 @@ func (a *Api) getAuthToken() (map[string]string, error) {
 }
 
 // Obtain a file upload token from the Google Photos API.
-func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) {
+func (a *Api) GetUploadToken(ctx context.Context, shaHashB64 string, fileSize int64) (string, error) {
 	// Create the protobuf message
 	protoBody := generated.GetUploadToken{
 		F1:            2,
@@ -272,7 +276,8 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 	}
 
 	// Create the request
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		"https://photos.googleapis.com/data/upload/uploadmedia/interactive",
 		bytes.NewReader(serializedData),
@@ -287,7 +292,7 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 	}
 
 	// Make the request
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -296,7 +301,7 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", &uploadHTTPError{statusCode: resp.StatusCode, body: string(body)}
+		return "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	// Get the upload token from headers
@@ -308,8 +313,20 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 	return uploadToken, nil
 }
 
-// Check library for existing files with the hash
-func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
+// FindRemoteMediaByHash checks the library for an item with this SHA-1 and
+// returns its media key, or "" when none exists. Transient failures are
+// retried here; an empty answer is a real "not found" and is not retried.
+func (a *Api) FindRemoteMediaByHash(ctx context.Context, shaHash []byte) (string, error) {
+	var mediaKey string
+	err := a.withRetry(ctx, a.retryConfig(), func(int) error {
+		var err error
+		mediaKey, err = a.findRemoteMediaOnce(ctx, shaHash)
+		return err
+	})
+	return mediaKey, err
+}
+
+func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, error) {
 	// Create the protobuf message
 
 	// Create and initialize the protobuf message with all required nested structures
@@ -344,7 +361,8 @@ func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
 	}
 
 	// Create the request
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		"https://photosdata-pa.googleapis.com/6439526531001121323/5084965799730810217",
 		bytes.NewReader(serializedData),
@@ -359,7 +377,7 @@ func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
 	}
 
 	// Make the request
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -368,7 +386,7 @@ func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		return "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	// Parse the response body
@@ -391,44 +409,9 @@ func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
 // attempt is 1-based (1 = first attempt, 2 = first retry, etc.)
 type UploadProgressCallback func(bytesUploaded, bytesTotal int64, attempt int)
 
-type uploadHTTPError struct {
-	statusCode int
-	body       string
-}
-
-func (e *uploadHTTPError) Error() string {
-	return fmt.Sprintf("request failed with status %d: %s", e.statusCode, e.body)
-}
-
 // errBadUploadResponse marks a 2xx upload response whose body could not be
 // read or parsed.
 var errBadUploadResponse = errors.New("unreadable upload response")
-
-func shouldRetryUploadError(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	// A truncated or garbled response committed nothing, and every retry
-	// opens a new upload session, so retrying is safe.
-	if errors.Is(err, errBadUploadResponse) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-
-	var httpErr *uploadHTTPError
-	if errors.As(err, &httpErr) {
-		if httpErr.statusCode == http.StatusTooManyRequests || httpErr.statusCode >= 500 {
-			return true
-		}
-
-		// A stale or interrupted resumable session can make the server compare the
-		// declared SHA-1 with a different request body. A new upload session and a
-		// fresh file read are safe for this specific 400 response.
-		return httpErr.statusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(httpErr.body), "checksum from header")
-	}
-
-	var networkErr net.Error
-	return errors.As(err, &networkErr)
-}
 
 // UploadFileWithHashAndProgress creates a new resumable upload session for
 // each retry. The hash is sent when creating the session, so the request body
@@ -441,41 +424,18 @@ func (a *Api) UploadFileWithHashAndProgress(
 	onProgress UploadProgressCallback,
 ) (ScottyFinalizeToken, error) {
 	shaHashB64 := base64.StdEncoding.EncodeToString(sha1Hash)
-	retryConfig := DefaultRetryConfig()
-	var lastErr error
-	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
-		attemptNum := attempt + 1
-		if ctx.Err() != nil {
-			return ScottyFinalizeToken{}, ctx.Err()
-		}
-		if attempt > 0 {
-			delay := CalculateBackoff(attempt-1, retryConfig)
-			select {
-			case <-ctx.Done():
-				return ScottyFinalizeToken{}, ctx.Err()
-			case <-time.After(delay):
-			}
-		}
-
-		var result ScottyFinalizeToken
-		uploadToken, err := a.GetUploadToken(shaHashB64, fileSize)
+	var result ScottyFinalizeToken
+	err := a.withRetry(ctx, a.retryConfig(), func(attempt int) error {
+		uploadToken, err := a.GetUploadToken(ctx, shaHashB64, fileSize)
 		if err == nil {
-			result, err = a.uploadFileAttempt(ctx, filePath, uploadToken, fileSize, onProgress, attemptNum)
+			result, err = a.uploadFileAttempt(ctx, filePath, uploadToken, fileSize, onProgress, attempt)
 		}
-		if err == nil {
-			return result, nil
-		}
-
-		lastErr = err
-		if ctx.Err() != nil {
-			return ScottyFinalizeToken{}, ctx.Err()
-		}
-		if !shouldRetryUploadError(err) {
-			return ScottyFinalizeToken{}, fmt.Errorf("upload failed after %d attempt(s): %w", attemptNum, err)
-		}
+		return err
+	})
+	if err != nil && ctx.Err() == nil {
+		return ScottyFinalizeToken{}, fmt.Errorf("upload %w", err)
 	}
-
-	return ScottyFinalizeToken{}, fmt.Errorf("upload failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
+	return result, err
 }
 
 func (a *Api) uploadFileAttempt(
@@ -541,7 +501,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 	req.Header.Set("User-Agent", a.userAgent)
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return ScottyFinalizeToken{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -550,7 +510,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 	// Check for non-success status codes (includes retryable 5xx/429 and non-retryable 4xx)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return ScottyFinalizeToken{}, &uploadHTTPError{statusCode: resp.StatusCode, body: string(body)}
+		return ScottyFinalizeToken{}, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	bodyBytes, err := ReadResponseBody(resp)
@@ -566,6 +526,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 
 // CommitUpload commits the upload to Google Photos
 func (a *Api) CommitUpload(
+	ctx context.Context,
 	uploadResponseDecoded *generated.CommitToken,
 	fileName string,
 	sha1Hash []byte,
@@ -617,37 +578,38 @@ func (a *Api) CommitUpload(
 		return "", fmt.Errorf("failed to marshal protobuf: %w", err)
 	}
 
-	return a.commitSerialized(serializedData)
+	return a.commitSerialized(ctx, serializedData)
 }
 
-func (a *Api) CommitLivePhoto(input LivePhotoCreateRequest) (string, error) {
+func (a *Api) CommitLivePhoto(ctx context.Context, input LivePhotoCreateRequest) (string, error) {
 	serializedData, err := BuildLivePhotoCreateMediaItemsRequest(input)
 	if err != nil {
 		return "", fmt.Errorf("build Live Photo create request: %w", err)
 	}
-	return a.commitSerialized(serializedData)
+	return a.commitSerialized(ctx, serializedData)
 }
 
-func (a *Api) ReconcileLivePhoto(input LivePhotoReconcileRequest) (string, error) {
+func (a *Api) ReconcileLivePhoto(ctx context.Context, input LivePhotoReconcileRequest) (string, error) {
 	serializedData, err := BuildLivePhotoReconcileMediaItemsRequest(input)
 	if err != nil {
 		return "", fmt.Errorf("build Live Photo reconcile request: %w", err)
 	}
-	return a.commitSerialized(serializedData)
+	return a.commitSerialized(ctx, serializedData)
 }
 
-func (a *Api) commitSerialized(serializedData []byte) (string, error) {
-	retryConfig := DefaultRetryConfig()
+func (a *Api) commitSerialized(ctx context.Context, serializedData []byte) (string, error) {
+	retryConfig := a.retryConfig()
 	if a.commitRetryConfig != nil {
 		retryConfig = *a.commitRetryConfig
 	}
 	var lastErr error
 	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
-			delay := CalculateBackoff(attempt-1, retryConfig)
-			time.Sleep(delay)
+			if err := waitRequest(ctx, CalculateBackoff(attempt-1, retryConfig)); err != nil {
+				return "", err
+			}
 		}
-		mediaKey, retryable, err := a.doCommitRequest(serializedData)
+		mediaKey, retryable, err := a.doCommitRequest(ctx, serializedData)
 		if err == nil {
 			return mediaKey, nil
 		}
@@ -659,7 +621,7 @@ func (a *Api) commitSerialized(serializedData []byte) (string, error) {
 	return "", fmt.Errorf("commit failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
 }
 
-func (a *Api) doCommitRequest(serializedData []byte) (mediaKey string, retryable bool, err error) {
+func (a *Api) doCommitRequest(ctx context.Context, serializedData []byte) (mediaKey string, retryable bool, err error) {
 	bearerToken, err := a.BearerToken()
 	if err != nil {
 		return "", true, fmt.Errorf("failed to get bearer token: %w", err)
@@ -679,7 +641,7 @@ func (a *Api) doCommitRequest(serializedData []byte) (mediaKey string, retryable
 	if endpoint == "" {
 		endpoint = photosCreateMediaItemsEndpoint
 	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(serializedData))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(serializedData))
 	if err != nil {
 		return "", false, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -687,15 +649,16 @@ func (a *Api) doCommitRequest(serializedData []byte) (mediaKey string, retryable
 		req.Header.Set(k, v)
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
-		return "", true, fmt.Errorf("request failed: %w", err)
+		return "", ctx.Err() == nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", ShouldRetry(resp, nil), fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		statusErr := &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return "", a.shouldRetry(statusErr), statusErr
 	}
 
 	bodyBytes, err := ReadResponseBody(resp)
@@ -730,7 +693,7 @@ func parseCreateMediaItemsResponse(responseBytes []byte) (string, error) {
 
 // CreateAlbum creates a new album with the given name and initial media items.
 // Returns the album media key for subsequent AddMediaToAlbum calls.
-func (a *Api) CreateAlbum(albumName string, mediaKeys []string) (string, error) {
+func (a *Api) CreateAlbum(ctx context.Context, albumName string, mediaKeys []string) (string, error) {
 	// Build media keys structure
 	protoMediaKeys := make([]*generated.CreateAlbumField4Type, len(mediaKeys))
 	for i, key := range mediaKeys {
@@ -780,7 +743,8 @@ func (a *Api) CreateAlbum(albumName string, mediaKeys []string) (string, error) 
 	}
 
 	// Create the request
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		"https://photosdata-pa.googleapis.com/6439526531001121323/8386163679468898444",
 		bytes.NewReader(serializedData),
@@ -795,7 +759,7 @@ func (a *Api) CreateAlbum(albumName string, mediaKeys []string) (string, error) 
 	}
 
 	// Make the request
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -804,7 +768,7 @@ func (a *Api) CreateAlbum(albumName string, mediaKeys []string) (string, error) 
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		return "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	// Parse the response body
@@ -832,7 +796,7 @@ func (a *Api) CreateAlbum(albumName string, mediaKeys []string) (string, error) 
 }
 
 // AddMediaToAlbum adds media items to an existing album.
-func (a *Api) AddMediaToAlbum(albumMediaKey string, mediaKeys []string) error {
+func (a *Api) AddMediaToAlbum(ctx context.Context, albumMediaKey string, mediaKeys []string) error {
 	// Create the protobuf message
 	protoBody := generated.AddMediaToAlbum{
 		MediaKeys:     mediaKeys,
@@ -870,7 +834,8 @@ func (a *Api) AddMediaToAlbum(albumMediaKey string, mediaKeys []string) error {
 	}
 
 	// Create the request
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		"https://photosdata-pa.googleapis.com/6439526531001121323/484917746253879292",
 		bytes.NewReader(serializedData),
@@ -885,7 +850,7 @@ func (a *Api) AddMediaToAlbum(albumMediaKey string, mediaKeys []string) error {
 	}
 
 	// Make the request
-	resp, err := a.client.Do(req)
+	resp, err := a.do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -894,7 +859,7 @@ func (a *Api) AddMediaToAlbum(albumMediaKey string, mediaKeys []string) error {
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		return &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	return nil

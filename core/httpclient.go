@@ -68,15 +68,19 @@ func ShouldRetry(resp *http.Response, err error) bool {
 	return resp.StatusCode >= 500 || resp.StatusCode == 429
 }
 
-// CalculateBackoff returns the delay for a given attempt (exponential backoff with jitter)
+// CalculateBackoff returns the delay for a given attempt (exponential backoff
+// with up to 10% jitter). Doubling stops at MaxDelay, so the large attempt
+// counts that --max-retries allows cannot overflow, and a zero delay cannot
+// panic in rand.
 func CalculateBackoff(attempt int, config RetryConfig) time.Duration {
-	delay := config.InitialDelay * time.Duration(1<<uint(attempt))
-	if delay > config.MaxDelay {
-		delay = config.MaxDelay
+	delay := min(config.InitialDelay, config.MaxDelay)
+	for i := 0; i < attempt && delay < config.MaxDelay; i++ {
+		delay = min(delay*2, config.MaxDelay)
 	}
-	// Add up to 10% jitter to prevent thundering herd
-	jitter := time.Duration(rand.Int63n(int64(delay / 10)))
-	return delay + jitter
+	if delay <= 0 {
+		return 0
+	}
+	return delay + time.Duration(rand.Int63n(max(int64(1), int64(delay/10))))
 }
 
 // CheckResponse validates an HTTP response and returns an error if not successful (2xx)
