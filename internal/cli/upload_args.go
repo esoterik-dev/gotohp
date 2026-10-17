@@ -46,7 +46,7 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("upload-incomplete-live-photos", false, "upload an unmatched Live Photo member as a single file")
 	f.Bool("update-existing-photos-to-live", false, "attach matching MOV files to existing photos")
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
-	f.StringP("log-level", "l", "info", "log level: debug, info, warn, error")
+	f.StringP("log-level", "l", "info", "stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
 	f.String("state-file", "", "read confirmed upload state from PATH")
 	f.Bool("update-state", false, "checkpoint confirmed uploads to --state-file")
@@ -116,6 +116,9 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	opts.Api.Policy = policy
 
 	logLevel, _ := f.GetString("log-level")
+	if _, err := parseLogLevel(logLevel); err != nil {
+		return err
+	}
 	noTUI, _ := f.GetBool("no-tui")
 	reportFile, _ := f.GetString("report-file")
 	return runUpload(paths, opts, uploadRunSettings{
