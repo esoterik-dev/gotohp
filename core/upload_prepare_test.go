@@ -15,11 +15,16 @@ func TestWorkerCounts(t *testing.T) {
 		opts         UploadOptions
 		hash, upload int
 	}{
-		{UploadOptions{Threads: 8}, 8, 8},
+		{UploadOptions{Threads: 8}, 8, 0}, // one pool, as before the split
 		{UploadOptions{Threads: 8, HashThreads: 6, UploadThreads: 2}, 6, 2},
-		{UploadOptions{}, 1, 1},
+		{UploadOptions{Threads: 8, HashThreads: 4}, 4, 8},
+		{UploadOptions{Threads: 8, UploadThreads: 2}, 8, 2},
+		{UploadOptions{}, 1, 0},
 	} {
 		got := tc.opts.normalized()
+		if again := got.normalized(); again != got {
+			t.Fatalf("normalized is not idempotent: %+v then %+v", got, again)
+		}
 		if got.HashThreads != tc.hash || got.UploadThreads != tc.upload {
 			t.Fatalf("%+v", got)
 		}
