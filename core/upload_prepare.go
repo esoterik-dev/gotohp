@@ -74,10 +74,11 @@ func (f preparedFile) uploadable() error {
 // preparedUpload is one work item ready for the network stage. files follow
 // uploadWorkPaths order. cleanup must run once the item is finished.
 type preparedUpload struct {
-	item   UploadWorkItem
-	files  []preparedFile
-	staged *stagedFiles
-	err    error
+	item      UploadWorkItem
+	files     []preparedFile
+	staged    *stagedFiles
+	err       error
+	cachedKey string // media key from the state file; the item was not hashed
 }
 
 func (p preparedUpload) cleanup() { p.staged.cleanup() }
@@ -153,7 +154,8 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 // started item yields exactly one preparedUpload or finish call, including
 // after cancellation. Closing stop, or canceling ctx, stops starting new
 // items; canceling ctx also aborts hashing in progress.
-func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWorkItem, opts UploadOptions, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
+// Items the state file already confirms skip hashing and go to finish.
+func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWorkItem, opts UploadOptions, state *uploadState, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
 	jobs := make(chan UploadWorkItem)
 	// With --stage-local every queued item holds a temporary copy, so the
 	// queue is bounded and hash workers wait for upload workers. Otherwise a
@@ -193,6 +195,10 @@ func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWor
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
+				if key := state.lookup(item, opts); key != "" {
+					finish(workerID, preparedUpload{item: item, cachedKey: key})
+					continue
+				}
 				prepared := prepareUpload(ctx, item, opts, workerID, reporter)
 				if finder != nil && prepared.err == nil && item.Kind == UploadWorkSingle && !opts.ForceUpload {
 					prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)

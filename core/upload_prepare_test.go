@@ -58,7 +58,7 @@ func TestCancelledPreparationStartsNothing(t *testing.T) {
 	for i := range items {
 		items[i] = UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: "missing.jpg"}}
 	}
-	ready := prepareUploads(ctx, nil, items, UploadOptions{HashThreads: 8, UploadThreads: 2, StageLocal: true}, nil, NopReporter{}, nil)
+	ready := prepareUploads(ctx, nil, items, UploadOptions{HashThreads: 8, UploadThreads: 2, StageLocal: true}, nil, nil, NopReporter{}, nil)
 	if cap(ready) != 2 { // staged copies keep the queue bounded
 		t.Fatalf("queue capacity=%d", cap(ready))
 	}
@@ -81,7 +81,7 @@ func TestHashWorkersDoNotWaitForUploadWorkers(t *testing.T) {
 		items[i] = UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: path}}
 	}
 	reporter := &finishRecorder{}
-	ready := prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 4, UploadThreads: 1}, nil, reporter, nil)
+	ready := prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 4, UploadThreads: 1}, nil, nil, reporter, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for reporter.finished.Load() < 4 {
 		if time.Now().After(deadline) {
@@ -133,7 +133,7 @@ func TestHashWorkersReturnToIdle(t *testing.T) {
 		items[i] = UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: path}}
 	}
 	reporter := &statusRecorder{last: make(map[int]string)}
-	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 3, UploadThreads: 2}, nil, reporter, nil) {
+	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 3, UploadThreads: 2}, nil, nil, reporter, nil) {
 		if p.err != nil {
 			t.Fatal(p.err)
 		}
@@ -198,7 +198,7 @@ func TestHashWorkersFinishDuplicates(t *testing.T) {
 		finished[len(finished)] = true
 	}
 	queued := 0
-	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 3, UploadThreads: 2}, finder, NopReporter{}, finish) {
+	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{HashThreads: 3, UploadThreads: 2}, nil, finder, NopReporter{}, finish) {
 		queued++
 		if p.err != nil || !p.files[0].checked || p.files[0].remoteKey != "" {
 			t.Fatalf("queued %+v", p.files)
@@ -216,7 +216,7 @@ func TestForceUploadSkipsDuplicateCheck(t *testing.T) {
 	}
 	finder := &hashFinder{}
 	items := []UploadWorkItem{{Kind: UploadWorkSingle, Single: &SingleMedia{Path: path}}}
-	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{ForceUpload: true, HashThreads: 1, UploadThreads: 1}, finder, NopReporter{}, nil) {
+	for p := range prepareUploads(context.Background(), nil, items, UploadOptions{ForceUpload: true, HashThreads: 1, UploadThreads: 1}, nil, finder, NopReporter{}, nil) {
 		if p.err != nil || p.files[0].checked {
 			t.Fatalf("%+v", p)
 		}

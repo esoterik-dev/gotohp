@@ -21,6 +21,11 @@ type UploadOptions struct {
 	DeleteFromHost                bool
 	DisableUnsupportedFilesFilter bool
 	SetDateFromFilename           bool
+	// StateFile records confirmed uploads so a rerun skips them without
+	// hashing. UpdateState writes it; RevalidateState ignores its records.
+	StateFile       string
+	UpdateState     bool
+	RevalidateState bool
 	// StageLocal copies each upload work item to os.TempDir (TMPDIR on Unix)
 	// before hashing and uploading. This is useful for FUSE/device sources.
 	StageLocal bool

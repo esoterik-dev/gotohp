@@ -438,7 +438,7 @@ func TestCanceledRunKeepsKnownDuplicate(t *testing.T) {
 	prepared := prepareUpload(context.Background(), item, UploadOptions{}, 0, NopReporter{})
 	prepared.files[0].checked, prepared.files[0].remoteKey = true, "existing"
 	results := make(chan FileUploadResult, 1)
-	m.finishPrepared(0, newFakeLibrary(), nil, prepared, results, UploadOptions{})
+	m.finishPrepared(0, newFakeLibrary(), nil, prepared, results, UploadOptions{}, nil)
 	if res := <-results; !res.Skipped || res.MediaKey != "existing" {
 		t.Fatalf("known duplicate reported as %+v", res)
 	}
@@ -554,3 +554,5 @@ func TestUploadCtrlCDropsQueuedFiles(t *testing.T) {
 		}
 	}
 }
+
+// README: with --state-file --update-state, a rerun skips confirmed items
