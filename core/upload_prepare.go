@@ -59,6 +59,18 @@ func (f preparedFile) unchanged() error {
 	return nil
 }
 
+// uploadable fails if uploading f would send bytes that do not match its
+// hash. A staged copy is stable, so it can be uploaded even if the source
+// changed since; only deleting that source is refused (see unchanged). An
+// unstaged file was hashed from the source itself, so any change makes the
+// hash stale.
+func (f preparedFile) uploadable() error {
+	if f.upload != f.source {
+		return nil
+	}
+	return f.unchanged()
+}
+
 // preparedUpload is one work item ready for the network stage. files follow
 // uploadWorkPaths order. cleanup must run once the item is finished.
 type preparedUpload struct {
