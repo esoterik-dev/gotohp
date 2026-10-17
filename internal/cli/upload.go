@@ -50,8 +50,9 @@ type preflightWarningMsg struct {
 
 type uploadCompleteMsg struct{}
 
-// cancelMsg asks the run to stop. The first one drains in-flight work so the
-// report stays complete; a second one quits immediately with what has finished.
+// cancelMsg asks the run to stop. The first one starts no new files and lets
+// in-flight files finish, so the report stays complete; a second one aborts
+// in-flight files and quits immediately with what has finished.
 type cancelMsg struct {
 	exitCode int
 }
@@ -97,7 +98,8 @@ type uploadModel struct {
 	forceQuit    bool
 	cancelExit   int
 	busy         map[int]bool // workerID -> currently processing an item
-	cancel       func()
+	stop         func()       // finish in-flight files, start no new ones
+	cancel       func()       // abort in-flight files
 	// Album state
 	albumName       string
 	albumItemsAdded int
@@ -167,8 +169,8 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uploadStartMsg:
 		m.totalFiles = msg.total
-		if m.canceled && m.cancel != nil {
-			m.cancel()
+		if m.canceled && m.stop != nil {
+			m.stop()
 		}
 		return m, nil
 
@@ -246,18 +248,21 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// requestCancel drains in-flight work on the first request and quits
-// immediately on the second, keeping whatever results have arrived.
+// requestCancel lets in-flight files finish on the first request, and aborts
+// them and quits on the second, keeping whatever results have arrived.
 func (m uploadModel) requestCancel(exitCode int) (tea.Model, tea.Cmd) {
 	if m.canceled {
 		m.forceQuit = true
 		m.quitting = true
+		if m.cancel != nil {
+			m.cancel()
+		}
 		return m, tea.Quit
 	}
 	m.canceled = true
 	m.cancelExit = exitCode
-	if m.cancel != nil {
-		m.cancel()
+	if m.stop != nil {
+		m.stop()
 	}
 	return m, nil // Drain worker results before writing the final report.
 }
@@ -286,7 +291,7 @@ func (m uploadModel) View() string {
 	if m.canceled {
 		cancelStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 		b.WriteString(cancelStyle.Render(fmt.Sprintf(
-			"Canceling, waiting for %d worker(s). Press Ctrl+C again to force quit.", m.busyWorkers())))
+			"Stopping: no new files start; waiting for %d in-progress file(s) to finish. Press Ctrl+C again to abort them and quit.", m.busyWorkers())))
 		b.WriteString("\n\n")
 	}
 
@@ -459,6 +464,7 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 		)
 	}
 	var uploadManager *core.UploadManager
+	model.stop = func() { uploadManager.Stop() }
 	model.cancel = func() { uploadManager.Cancel() }
 	p := tea.NewProgram(model, programOptions...)
 	uploadManager = core.NewUploadManager(teaReporter{p: p}, newLogger(parseLogLevel(settings.logLevel)))
@@ -496,7 +502,7 @@ func forwardSignals(p *tea.Program, signals <-chan os.Signal, done <-chan struct
 				exitCode = exitCodeTerminate
 			}
 			if first && !useTUI {
-				fmt.Fprintln(os.Stderr, "Canceling: waiting for in-progress uploads. Send the signal again to force quit.")
+				fmt.Fprintln(os.Stderr, "Stopping: no new files start; in-progress files will finish. Send the signal again to abort them and quit.")
 			}
 			p.Send(cancelMsg{exitCode: exitCode})
 		case <-done:
