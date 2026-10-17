@@ -48,6 +48,9 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
 	f.StringP("log-level", "l", "info", "log level: debug, info, warn, error")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
+	f.String("state-file", "", "read confirmed upload state from PATH")
+	f.Bool("update-state", false, "checkpoint confirmed uploads to --state-file")
+	f.Bool("revalidate-state", false, "ignore cached confirmations and recheck remote state")
 	f.String("report-file", "", "write the final JSON summary to PATH")
 	f.String("retry-report", "", "retry only failed, non-skipped files from a JSON report; no positional paths")
 
@@ -145,6 +148,9 @@ func uploadOptionsFromFlags(f *pflag.FlagSet) core.UploadOptions {
 	opts.Threads, _ = f.GetInt("threads")
 	opts.HashThreads, _ = f.GetInt("hash-threads")
 	opts.UploadThreads, _ = f.GetInt("upload-threads")
+	opts.StateFile, _ = f.GetString("state-file")
+	opts.UpdateState = getBool("update-state")
+	opts.RevalidateState = getBool("revalidate-state")
 	opts.ExcludePattern, _ = f.GetString("exclude")
 
 	album, _ := f.GetString("album")
@@ -179,6 +185,9 @@ func requestPolicyFromFlags(f *pflag.FlagSet) (*core.RequestPolicy, error) {
 func validateUploadOptions(f *pflag.FlagSet, opts core.UploadOptions) error {
 	if err := validateReportFile(f); err != nil {
 		return err
+	}
+	if (opts.UpdateState || opts.RevalidateState) && opts.StateFile == "" {
+		return fmt.Errorf("--update-state and --revalidate-state require --state-file")
 	}
 	for _, name := range []string{"hash-threads", "upload-threads"} {
 		if n, _ := f.GetInt(name); f.Changed(name) && n < 1 {

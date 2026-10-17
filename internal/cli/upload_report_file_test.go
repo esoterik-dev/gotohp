@@ -32,6 +32,12 @@ func TestReportDoesNotOverwriteInputs(t *testing.T) {
 			if err := validateReportFile(f); err != nil {
 				t.Fatal(err)
 			}
+			for _, suffix := range reportInputSuffixes[name] {
+				_ = f.Set("report-file", path+suffix)
+				if err := validateReportFile(f); err == nil {
+					t.Fatalf("allowed overwriting %s", path+suffix)
+				}
+			}
 		})
 	}
 }

@@ -11,7 +11,10 @@ import (
 )
 
 // reportInputFlags names the flags whose files --report-file must never replace.
-var reportInputFlags = []string{"config", "retry-report"}
+var reportInputFlags = []string{"config", "retry-report", "state-file"}
+
+// reportInputSuffixes adds files derived from an input flag's path.
+var reportInputSuffixes = map[string][]string{"state-file": {".lock"}}
 
 // validateReportFile rejects a --report-file that would overwrite an input
 // file, and checks that its directory is writable before any upload starts.
@@ -22,8 +25,13 @@ func validateReportFile(f *pflag.FlagSet) error {
 	}
 	for _, name := range reportInputFlags {
 		input, _ := f.GetString(name)
-		if input != "" && samePath(output, input) {
-			return fmt.Errorf("--report-file must not overwrite --%s", name)
+		if input == "" {
+			continue
+		}
+		for _, suffix := range append([]string{""}, reportInputSuffixes[name]...) {
+			if samePath(output, input+suffix) {
+				return fmt.Errorf("--report-file must not overwrite --%s or its files", name)
+			}
 		}
 	}
 	// The config in use may come from a default location rather than --config.

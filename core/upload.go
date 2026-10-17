@@ -210,8 +210,10 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		return
 	}
 
-	checkApi, err := m.newAPI(opts.Api)
-	if err != nil {
+	checkApi, apiErr := m.newAPI(opts.Api)
+	state, stateErr := openUploadState(opts)
+	if err := errors.Join(apiErr, stateErr); err != nil {
+		state.close()
 		for _, item := range workItems {
 			path := uploadWorkPrimaryPath(item)
 			m.reporter.FileResult(FileUploadResult{
@@ -257,14 +259,14 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	// Hash workers also check for duplicates and finish items already in the
 	// library, so only real uploads wait for a network worker. They finish
 	// before workChan closes, so before the network workers and results do.
-	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, checkApi, m.reporter, func(workerID int, p preparedUpload) {
-		m.finishPrepared(workerID, checkApi, nil, p, results, opts)
+	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, state, checkApi, m.reporter, func(workerID int, p preparedUpload) {
+		m.finishPrepared(workerID, checkApi, nil, p, results, opts, state)
 	})
 
 	// Start workers
 	for i := range numWorkers {
 		m.wg.Add(1)
-		go m.runWorker(i, workChan, results, opts)
+		go m.runWorker(i, workChan, results, opts, state)
 	}
 	if numWorkers == 0 {
 		// One pool: hash workers finish every item themselves. workChan
@@ -305,6 +307,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		m.logger.Info("upload complete", "successful", len(successfulUploads),
 			"albumName", opts.AlbumName, "albumAutoMode", opts.AlbumAutoMode)
 
+		state.close()
 		if len(successfulUploads) > 0 {
 			m.handleAlbumCreation(successfulUploads, opts.AlbumName, opts.AlbumAutoMode)
 		}
@@ -737,7 +740,7 @@ func removeUploadedSource(file preparedFile) error {
 	return os.Remove(file.source)
 }
 
-func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
+func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, results chan<- FileUploadResult, opts UploadOptions, state *uploadState) {
 	defer m.wg.Done()
 
 	// Emit idle status initially
@@ -761,7 +764,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, 
 			continue
 		default:
 		}
-		m.finishPrepared(workerID, api, apiErr, prepared, results, opts)
+		m.finishPrepared(workerID, api, apiErr, prepared, results, opts, state)
 
 		// Mark as idle after completing file
 		m.reporter.ThreadStatus(ThreadStatus{
@@ -782,16 +785,18 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, 
 // finishPrepared uploads one prepared item, or reports it when preparation
 // failed or found it in the library, and sends its result. apiErr is the
 // error from creating api, if any.
-func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error, prepared preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
+func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error, prepared preparedUpload, results chan<- FileUploadResult, opts UploadOptions, state *uploadState) {
 	cancel := m.getCancelChan()
 	item := prepared.item
 	failure := prepared.err
 	if failure == nil {
 		failure = apiErr
 	}
-	// An item already found in the library needs no request, so a cancel
-	// does not turn its known result into a failure.
-	known := failure == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
+	// An item already found in the library, or confirmed by the state file,
+	// needs no request, so a cancel does not turn its known result into a
+	// failure.
+	known := failure == nil && (prepared.cachedKey != "" ||
+		item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != "")
 	select {
 	case <-cancel:
 		if !known {
@@ -802,6 +807,11 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	if failure != nil {
 		results <- FileUploadResult{IsError: true, IsLivePhoto: item.Kind == UploadWorkLivePhoto, Error: failure, ErrorMessage: failure.Error(), Path: uploadWorkPrimaryPath(item), Paths: uploadWorkPaths(item)}
 		prepared.cleanup()
+		return
+	}
+	if prepared.cachedKey != "" {
+		// Cache-only hits never delete originals: nothing was checked this run.
+		results <- FileUploadResult{IsLivePhoto: item.Kind == UploadWorkLivePhoto, Path: uploadWorkPrimaryPath(item), Paths: uploadWorkPaths(item), Skipped: true, SkipCode: "state-cache", SkipReason: "Previously confirmed for this account and upload policy", MediaKey: prepared.cachedKey}
 		return
 	}
 	ctx, cancelUpload := context.WithCancel(context.Background())
@@ -817,7 +827,7 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	path := uploadWorkPrimaryPath(item)
 	paths := uploadWorkPaths(item)
 	isLivePhoto := item.Kind == UploadWorkLivePhoto
-	mediaKey, skipped, err := uploadWorkItem(ctx, api, prepared, opts, workerID, m.reporter)
+	mediaKey, skipped, err := uploadPreparedItem(ctx, api, prepared, opts, state, workerID, m.reporter)
 	skipCode, skipReason := remoteSkip(isLivePhoto)
 	if err != nil && mediaKey != "" {
 		// The item is in the library; only deleting the local copy failed.
@@ -871,6 +881,37 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	}
 	cancelUpload()
 	prepared.cleanup()
+}
+
+// uploadPreparedItem uploads one item and, with a writable state, checkpoints
+// it. --delete then waits until the checkpoint is durable. Without a writable
+// state, deletion happens inside the upload exactly as before.
+func uploadPreparedItem(ctx context.Context, api uploadAPI, prepared preparedUpload, opts UploadOptions, state *uploadState, workerID int, reporter UploadReporter) (string, bool, error) {
+	deleteAfterCheckpoint := opts.DeleteFromHost && state.writable()
+	if deleteAfterCheckpoint {
+		opts.DeleteFromHost = false
+	}
+	mediaKey, skipped, err := uploadWorkItem(ctx, api, prepared, opts, workerID, reporter)
+	if err != nil {
+		return mediaKey, skipped, err
+	}
+	if err := state.save(prepared, mediaKey, skipped); err != nil {
+		// Report the item as failed: it must not be deleted without a checkpoint.
+		return "", false, fmt.Errorf("upload confirmed but state checkpoint failed: %w", err)
+	}
+	if deleteAfterCheckpoint && mediaKey != "" && (!skipped || prepared.item.Kind == UploadWorkSingle) {
+		return mediaKey, skipped, removePreparedSources(prepared)
+	}
+	return mediaKey, skipped, nil
+}
+
+// removePreparedSources deletes an item's sources, refusing any that changed
+// after hashing.
+func removePreparedSources(prepared preparedUpload) error {
+	if prepared.item.Kind == UploadWorkLivePhoto {
+		return removeLivePhotoSources(*prepared.item.LivePhoto, prepared.files...)
+	}
+	return removeUploadedSource(prepared.files[0])
 }
 
 // remoteSkip describes an item skipped because it is already in the library.
