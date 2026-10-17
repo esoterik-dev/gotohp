@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +9,7 @@ import (
 
 type livePhotoUploadAPI interface {
 	FindRemoteMediaByHash(hash []byte) (string, error)
-	GetUploadToken(sha1Hash string, fileSize int64) (string, error)
-	UploadFileWithProgress(ctx context.Context, filePath string, uploadToken string, onProgress UploadProgressCallback) (ScottyFinalizeToken, error)
+	UploadFileWithHashAndProgress(ctx context.Context, filePath string, sha1Hash []byte, fileSize int64, onProgress UploadProgressCallback) (ScottyFinalizeToken, error)
 	CommitLivePhoto(input LivePhotoCreateRequest) (string, error)
 	ReconcileLivePhoto(input LivePhotoReconcileRequest) (string, error)
 }
@@ -252,10 +250,6 @@ func uploadLivePhotoComponent(
 	displayName string,
 	reporter UploadReporter,
 ) (ScottyFinalizeToken, error) {
-	uploadSession, err := api.GetUploadToken(base64.StdEncoding.EncodeToString(hash), size)
-	if err != nil {
-		return ScottyFinalizeToken{}, err
-	}
 	progress := func(bytesUploaded, _ int64, attempt int) {
 		message := "Uploading Live Photo pair..."
 		if attempt > 1 {
@@ -272,7 +266,7 @@ func uploadLivePhotoComponent(
 			Attempt:       attempt,
 		})
 	}
-	return api.UploadFileWithProgress(ctx, componentPath, uploadSession, progress)
+	return api.UploadFileWithHashAndProgress(ctx, componentPath, hash, size, progress)
 }
 
 func removeLivePhotoFiles(pair LivePhotoPair) error {

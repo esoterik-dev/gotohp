@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -616,8 +615,6 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		return "", fmt.Errorf("error calculating hash file: %w", err)
 	}
 
-	sha1_hash_b64 := base64.StdEncoding.EncodeToString([]byte(sha1_hash_bytes))
-
 	// Stage 2: Checking if exists in library
 	if !opts.ForceUpload {
 		reporter.ThreadStatus(ThreadStatus{
@@ -673,11 +670,6 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		BytesTotal:    fileSize,
 	})
 
-	token, err := api.GetUploadToken(sha1_hash_b64, fileSize)
-	if err != nil {
-		return "", fmt.Errorf("error uploading file: %w", err)
-	}
-
 	// Create progress callback for upload
 	progressCallback := func(bytesUploaded, bytesTotal int64, attempt int) {
 		message := "Uploading..."
@@ -696,7 +688,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		})
 	}
 
-	finalizeToken, err := api.UploadFileWithProgress(ctx, filePath, token, progressCallback)
+	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, filePath, sha1_hash_bytes, fileSize, progressCallback)
 	if err != nil {
 		return "", fmt.Errorf("error uploading file: %w", err)
 	}
