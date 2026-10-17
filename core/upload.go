@@ -575,10 +575,13 @@ func UploadFile(ctx context.Context, api *Api, filePath string, opts UploadOptio
 	if reporter == nil {
 		reporter = NopReporter{}
 	}
-	return uploadSingleFile(ctx, api, filePath, opts, workerID, reporter)
+	mediaKey, _, err := uploadSingleFile(ctx, api, filePath, opts, workerID, reporter)
+	return mediaKey, err
 }
 
-func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts UploadOptions, workerID int, reporter UploadReporter) (string, error) {
+// uploadSingleFile uploads one file. The bool is true when the file already
+// exists remotely; the returned media key is then the existing item's key.
+func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
 	fileName := filepath.Base(filePath)
 	mediakey := ""
 
@@ -605,7 +608,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 
 	sha1_hash_bytes, err := CalculateSHA1(ctx, filePath)
 	if err != nil {
-		return "", fmt.Errorf("error calculating hash file: %w", err)
+		return "", false, fmt.Errorf("error calculating hash file: %w", err)
 	}
 
 	// Stage 2: Checking if exists in library
@@ -639,16 +642,16 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 			})
 			if opts.DeleteFromHost {
 				if err := os.Remove(filePath); err != nil {
-					return mediakey, fmt.Errorf("file exists in library but failed to delete local copy: %w", err)
+					return mediakey, true, fmt.Errorf("file exists in library but failed to delete local copy: %w", err)
 				}
 			}
-			return mediakey, nil
+			return mediakey, true, nil
 		}
 	}
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		return "", fmt.Errorf("error getting file info: %w", err)
+		return "", false, fmt.Errorf("error getting file info: %w", err)
 	}
 
 	// Stage 3: Uploading
@@ -683,11 +686,11 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 
 	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, filePath, sha1_hash_bytes, fileSize, progressCallback)
 	if err != nil {
-		return "", fmt.Errorf("error uploading file: %w", err)
+		return "", false, fmt.Errorf("error uploading file: %w", err)
 	}
 	commitToken, err := finalizeToken.legacyCommitToken()
 	if err != nil {
-		return "", fmt.Errorf("error decoding upload finalize token: %w", err)
+		return "", false, fmt.Errorf("error decoding upload finalize token: %w", err)
 	}
 
 	// Stage 4: Finalizing
@@ -701,20 +704,20 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 
 	mediaKey, err := api.CommitUpload(commitToken, fileInfo.Name(), sha1_hash_bytes, uploadTimestamp)
 	if err != nil {
-		return "", fmt.Errorf("error committing file: %w", err)
+		return "", false, fmt.Errorf("error committing file: %w", err)
 	}
 
 	if len(mediaKey) == 0 {
-		return "", fmt.Errorf("media key not received")
+		return "", false, fmt.Errorf("media key not received")
 	}
 
 	if opts.DeleteFromHost {
 		if err := os.Remove(filePath); err != nil {
-			return mediaKey, fmt.Errorf("uploaded successfully but failed to delete file: %w", err)
+			return mediaKey, false, fmt.Errorf("uploaded successfully but failed to delete file: %w", err)
 		}
 	}
 
-	return mediaKey, nil
+	return mediaKey, false, nil
 }
 
 func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, results chan<- FileUploadResult, opts UploadOptions) {
@@ -797,6 +800,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 				results <- FileUploadResult{
 					IsLivePhoto: isLivePhoto,
 					Skipped:     true,
+					MediaKey:    mediaKey,
 					SkipCode:    skipCode,
 					SkipReason:  skipReason,
 					Path:        path,
@@ -837,8 +841,7 @@ func uploadWorkItem(ctx context.Context, api *Api, item UploadWorkItem, opts Upl
 		if item.Single == nil || item.LivePhoto != nil {
 			return "", false, fmt.Errorf("invalid single-media work item")
 		}
-		mediaKey, err := uploadSingleFile(ctx, api, item.Single.Path, opts, workerID, reporter)
-		return mediaKey, false, err
+		return uploadSingleFile(ctx, api, item.Single.Path, opts, workerID, reporter)
 	case UploadWorkLivePhoto:
 		if item.LivePhoto == nil || item.Single != nil {
 			return "", false, fmt.Errorf("invalid Live Photo work item")
