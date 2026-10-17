@@ -371,7 +371,16 @@ func (m *UploadManager) handleAlbumCreation(uploads map[string]string, albumName
 		return
 	}
 
-	albumManager := NewAlbumManager(api, m.reporter, m.logger, m.getCancelChan())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-m.getCancelChan():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	albumManager := NewAlbumManager(ctx, api, m.reporter, m.logger)
 
 	// Check if AUTO mode is enabled
 	if albumAutoMode {
@@ -647,16 +656,10 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 			Message:  "Checking if file exists in library...",
 		})
 
-		mediakey, err = api.FindRemoteMediaByHash(sha1_hash_bytes)
+		mediakey, err = api.FindRemoteMediaByHash(ctx, sha1_hash_bytes)
 		if err != nil {
-			// Non-fatal: log via callback and continue with upload
-			reporter.ThreadStatus(ThreadStatus{
-				WorkerID: workerID,
-				Status:   "checking",
-				FilePath: filePath,
-				FileName: fileName,
-				Message:  fmt.Sprintf("Hash check warning: %v, proceeding with upload", err),
-			})
+			// Uploading without a completed duplicate check risks a duplicate item.
+			return "", false, fmt.Errorf("remote duplicate check failed; upload deferred: %w", err)
 		}
 		if len(mediakey) > 0 {
 			reporter.ThreadStatus(ThreadStatus{
@@ -728,7 +731,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		Message:  "Committing upload...",
 	})
 
-	mediaKey, err := api.CommitUpload(commitToken, fileName, sha1_hash_bytes, uploadTimestamp)
+	mediaKey, err := api.CommitUpload(ctx, commitToken, fileName, sha1_hash_bytes, uploadTimestamp)
 	if err != nil {
 		return "", false, fmt.Errorf("error committing file: %w", err)
 	}

@@ -32,6 +32,9 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("saver", false, "upload in storage saver quality")
 	f.BoolP("recursive", "r", false, "include subdirectories")
 	f.IntP("threads", "t", core.DefaultPreferences.UploadThreads, "number of upload threads")
+	f.Bool("retry-429", true, "retry HTTP 429 responses (disable with --retry-429=false)")
+	f.Int("max-retries", core.DefaultMaxRetries, "retries after the initial attempt for transient request failures (0 disables)")
+	f.Int("requests-per-minute", core.DefaultRequestsPerMinute, "shared Photos RPC rate limit (0 disables proactive limiting)")
 	f.BoolP("force", "f", false, "upload even if the file already exists in the library")
 	f.BoolP("delete", "d", false, "delete from host after upload")
 	f.Bool("disable-filter", false, "disable file type filtering")
@@ -103,6 +106,11 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	if err := validateUploadOptions(f, opts); err != nil {
 		return err
 	}
+	policy, err := requestPolicyFromFlags(f)
+	if err != nil {
+		return err
+	}
+	opts.Api.Policy = policy
 
 	logLevel, _ := f.GetString("log-level")
 	noTUI, _ := f.GetBool("no-tui")
@@ -146,6 +154,15 @@ func uploadOptionsFromFlags(f *pflag.FlagSet) core.UploadOptions {
 		opts.AlbumName = album
 	}
 	return opts
+}
+
+// requestPolicyFromFlags builds the run's shared request policy. The CLI always
+// sets one; library callers that pass none keep unpaced default retries.
+func requestPolicyFromFlags(f *pflag.FlagSet) (*core.RequestPolicy, error) {
+	retry429, _ := f.GetBool("retry-429")
+	maxRetries, _ := f.GetInt("max-retries")
+	requestsPerMinute, _ := f.GetInt("requests-per-minute")
+	return core.NewRequestPolicy(maxRetries, retry429, requestsPerMinute)
 }
 
 // validateUploadOptions rejects flags that only make sense with Live Photo
