@@ -108,6 +108,7 @@ func newVerifyLivePhotosCommand() *cobra.Command {
 	f.String("account", "", "account to check (default: the selected account)")
 	f.String("proxy", "", "proxy URL for all requests")
 	f.IntP("threads", "t", 1, "number of concurrent verification workers")
+	addRequestPolicyFlags(f)
 	f.Int("limit", 0, "verify only the first N pairs (0 means all)")
 	f.String("report-file", "", "write the verification JSON report to PATH")
 	return cmd
@@ -153,7 +154,11 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 	}
 	account, _ := f.GetString("account")
 	proxy, _ := f.GetString("proxy")
-	api, err := core.NewApi(core.ApiOptions{Account: account, Proxy: proxy})
+	policy, err := requestPolicyFromFlags(f)
+	if err != nil {
+		return err
+	}
+	api, err := core.NewApi(core.ApiOptions{Account: account, Proxy: proxy, Policy: policy})
 	if err != nil {
 		return fmt.Errorf("create Google Photos API client: %w", err)
 	}
