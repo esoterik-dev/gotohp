@@ -151,7 +151,7 @@ func TestUploadFlagsPropagateToRunOptions(t *testing.T) {
 	opts, paths := parsedUploadOptions(t, "photo.jpg",
 		"--account", "cli@example.test", "--proxy", "http://cli.invalid:8080",
 		"--saver", "--use-quota", "-r", "-t", "7", "-f", "-d",
-		"--disable-filter", "--date-from-filename", "-e", "excluded",
+		"--disable-filter", "--date-from-filename", "--stage-local", "-e", "excluded",
 		"--pair-live-photos", "--upload-incomplete-live-photos",
 		"--update-existing-photos-to-live", "--ignore-apple-metadata", "-a", "Trip")
 	want := core.UploadOptions{
@@ -159,7 +159,7 @@ func TestUploadFlagsPropagateToRunOptions(t *testing.T) {
 			Account: "cli@example.test", Proxy: "http://cli.invalid:8080", Saver: true, UseQuota: true,
 		},
 		Recursive: true, Threads: 7, ForceUpload: true, DeleteFromHost: true,
-		DisableUnsupportedFilesFilter: true, SetDateFromFilename: true, ExcludePattern: "excluded",
+		DisableUnsupportedFilesFilter: true, SetDateFromFilename: true, StageLocal: true, ExcludePattern: "excluded",
 		PairLivePhotos: true, SkipIncompleteLivePhotos: false,
 		UpdateExistingPhotosToLive: true, IgnoreAppleMetadata: true, AlbumName: "Trip",
 	}
