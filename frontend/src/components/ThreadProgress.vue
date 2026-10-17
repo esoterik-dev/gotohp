@@ -22,6 +22,8 @@ const statusConfig = computed(() => {
       return { color: 'text-blue-500', bg: 'bg-blue-500/10', label: 'Uploading' }
     case 'hashing':
       return { color: 'text-cyan-500', bg: 'bg-cyan-500/10', label: 'Hashing' }
+    case 'queued':
+      return { color: 'text-muted-foreground', bg: 'bg-muted', label: 'Queued' }
     case 'checking':
       return { color: 'text-yellow-500', bg: 'bg-yellow-500/10', label: 'Checking' }
     case 'finalizing':
