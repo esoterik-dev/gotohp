@@ -37,6 +37,8 @@ type UploadManager struct {
 	logger   *slog.Logger
 	// apiOptions is captured from the options of the run in progress.
 	apiOptions ApiOptions
+	// newAPI creates the clients an upload run uses; tests swap in a fake.
+	newAPI func(ApiOptions) (uploadAPI, error)
 }
 
 // NewUploadManager creates a manager that reports progress to reporter. A nil
@@ -51,6 +53,7 @@ func NewUploadManager(reporter UploadReporter, logger *slog.Logger) *UploadManag
 	return &UploadManager{
 		reporter: reporter,
 		logger:   logger,
+		newAPI:   newUploadAPI,
 	}
 }
 
@@ -207,7 +210,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		return
 	}
 
-	checkApi, err := NewApi(opts.Api)
+	checkApi, err := m.newAPI(opts.Api)
 	if err != nil {
 		for _, item := range workItems {
 			path := uploadWorkPrimaryPath(item)
@@ -606,7 +609,7 @@ func UploadFile(ctx context.Context, api *Api, filePath string, opts UploadOptio
 // uploadSingleFile uploads one file that a hash worker has prepared. The bool
 // is true when the file already exists remotely; the returned media key is
 // then the existing item's key.
-func uploadSingleFile(ctx context.Context, api *Api, file preparedFile, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+func uploadSingleFile(ctx context.Context, api uploadAPI, file preparedFile, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
 	filePath := file.source
 	fileName := filepath.Base(filePath)
 	mediakey := ""
@@ -735,7 +738,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, 
 	})
 
 	// Create API client once per worker for connection reuse
-	api, apiErr := NewApi(opts.Api)
+	api, apiErr := m.newAPI(opts.Api)
 
 	// Drain the queue even after cancellation so every prepared item is
 	// cleaned up and gets a result.
@@ -761,7 +764,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, 
 // finishPrepared uploads one prepared item, or reports it when preparation
 // failed or found it in the library, and sends its result. apiErr is the
 // error from creating api, if any.
-func (m *UploadManager) finishPrepared(workerID int, api *Api, apiErr error, prepared preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
+func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error, prepared preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
 	cancel := m.getCancelChan()
 	item := prepared.item
 	failure := prepared.err
@@ -855,7 +858,7 @@ func remoteSkip(isLivePhoto bool) (code, reason string) {
 	return "remote-duplicate", "Skipped because this file already exists remotely"
 }
 
-func uploadWorkItem(ctx context.Context, api *Api, prepared preparedUpload, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+func uploadWorkItem(ctx context.Context, api uploadAPI, prepared preparedUpload, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
 	item := prepared.item
 	switch item.Kind {
 	case UploadWorkSingle:
@@ -868,7 +871,7 @@ func uploadWorkItem(ctx context.Context, api *Api, prepared preparedUpload, opts
 			return "", false, fmt.Errorf("invalid Live Photo work item")
 		}
 		return uploadLivePhotoWithCallback(ctx, api, *item.LivePhoto, prepared.files[0], prepared.files[1], LivePhotoUploadOptions{
-			Policy:                     buildLivePhotoCommitPolicy(api),
+			Policy:                     api.livePhotoCommitPolicy(),
 			DeleteFromHost:             opts.DeleteFromHost,
 			SetDateFromFilename:        opts.SetDateFromFilename,
 			UpdateExistingPhotosToLive: opts.UpdateExistingPhotosToLive,
