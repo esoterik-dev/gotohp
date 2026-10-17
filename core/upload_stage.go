@@ -27,14 +27,12 @@ func (r contextReader) Read(p []byte) (int, error) {
 	}
 }
 
-// stagedFiles holds local copies of one upload work item's sources. The
-// source file info is captured when each copy is made, so a source that
-// changes afterwards is never deleted as if it were the uploaded file.
+// stagedFiles holds local copies of one upload work item's sources, with the
+// source file info each copy matches.
 type stagedFiles struct {
-	paths   []string // local copies, in source order
-	sources []string
-	infos   []os.FileInfo
-	dir     string
+	paths []string // local copies, in source order
+	infos []os.FileInfo
+	dir   string
 }
 
 // stageFilesLocally copies source files into a new directory under
@@ -46,7 +44,7 @@ func stageFilesLocally(ctx context.Context, sourcePaths []string) (*stagedFiles,
 		return nil, fmt.Errorf("create local upload staging directory: %w", err)
 	}
 	liveStageDirs.Store(stageDir, struct{}{})
-	staged := &stagedFiles{sources: sourcePaths, dir: stageDir}
+	staged := &stagedFiles{dir: stageDir}
 	for index, sourcePath := range sourcePaths {
 		stagedPath := filepath.Join(stageDir, fmt.Sprintf("%d-%s", index, filepath.Base(sourcePath)))
 		info, err := stageOneFile(ctx, sourcePath, stagedPath)
@@ -79,24 +77,6 @@ func RemoveStagedFiles() {
 		liveStageDirs.Delete(dir)
 		return true
 	})
-}
-
-// verifySourcesUnchanged fails if any source was replaced or modified since
-// it was staged. A nil receiver means nothing was staged.
-func (s *stagedFiles) verifySourcesUnchanged() error {
-	if s == nil {
-		return nil
-	}
-	for i, path := range s.sources {
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		if !sameFileVersion(s.infos[i], info) {
-			return fmt.Errorf("refusing to delete %s: it changed after it was staged for upload", path)
-		}
-	}
-	return nil
 }
 
 func sameFileVersion(a, b os.FileInfo) bool {

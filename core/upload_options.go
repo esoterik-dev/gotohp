@@ -6,9 +6,13 @@ type UploadOptions struct {
 	// Api selects the account and upload policy used for every request.
 	Api ApiOptions
 
-	Recursive                     bool
-	ExcludePattern                string
-	Threads                       int
+	Recursive      bool
+	ExcludePattern string
+	Threads        int
+	// HashThreads and UploadThreads size the hashing and network worker
+	// pools; each defaults to Threads.
+	HashThreads                   int
+	UploadThreads                 int
 	ForceUpload                   bool
 	DeleteFromHost                bool
 	DisableUnsupportedFilesFilter bool
@@ -56,6 +60,12 @@ func (c Preferences) UploadOptions() UploadOptions {
 func (o UploadOptions) normalized() UploadOptions {
 	if o.Threads < 1 {
 		o.Threads = 1
+	}
+	if o.HashThreads < 1 {
+		o.HashThreads = o.Threads
+	}
+	if o.UploadThreads < 1 {
+		o.UploadThreads = o.Threads
 	}
 	if o.AlbumAutoMode {
 		o.AlbumName = ""
