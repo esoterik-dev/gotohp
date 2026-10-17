@@ -767,8 +767,16 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 			paths := uploadWorkPaths(item)
 			isLivePhoto := item.Kind == UploadWorkLivePhoto
 			mediaKey, skipped, err := uploadWorkItem(ctx, api, item, opts, workerID, m.reporter)
+			skipCode, skipReason := remoteSkip(isLivePhoto)
 			if err != nil && mediaKey != "" {
-				results <- FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
+				// The item is in the library; only deleting the local copy failed.
+				result := FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
+				message := fmt.Sprintf("Uploaded, but local cleanup failed: %v", err)
+				if skipped {
+					result.Skipped, result.SkipCode, result.SkipReason = true, skipCode, skipReason
+					message = fmt.Sprintf("Already in library, but local cleanup failed: %v", err)
+				}
+				results <- result
 				m.reporter.Warning(PreflightWarning{
 					Paths:   paths,
 					Code:    "local-cleanup-failed",
@@ -779,7 +787,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 					Status:   "completed",
 					FilePath: path,
 					FileName: filepath.Base(path),
-					Message:  fmt.Sprintf("Uploaded, but local cleanup failed: %v", err),
+					Message:  message,
 				})
 			} else if err != nil {
 				results <- FileUploadResult{IsError: true, IsLivePhoto: isLivePhoto, Error: err, ErrorMessage: err.Error(), Path: path, Paths: paths}
@@ -791,12 +799,6 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 					Message:  fmt.Sprintf("Error: %v", err),
 				})
 			} else if skipped {
-				skipCode := "remote-duplicate"
-				skipReason := "Skipped because this file already exists remotely"
-				if isLivePhoto {
-					skipCode = "remote-live-photo-component-exists"
-					skipReason = "Skipped because a Live Photo component already exists remotely"
-				}
 				results <- FileUploadResult{
 					IsLivePhoto: isLivePhoto,
 					Skipped:     true,
@@ -833,6 +835,14 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 		Status:   "idle",
 		Message:  "Finished",
 	})
+}
+
+// remoteSkip describes an item skipped because it is already in the library.
+func remoteSkip(isLivePhoto bool) (code, reason string) {
+	if isLivePhoto {
+		return "remote-live-photo-component-exists", "Skipped because a Live Photo component already exists remotely"
+	}
+	return "remote-duplicate", "Skipped because this file already exists remotely"
 }
 
 func uploadWorkItem(ctx context.Context, api *Api, item UploadWorkItem, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
