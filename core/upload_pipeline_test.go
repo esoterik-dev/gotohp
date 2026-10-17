@@ -500,6 +500,41 @@ func TestUploadCtrlCDropsQueuedFiles(t *testing.T) {
 }
 
 // README: with --state-file --update-state, a rerun skips confirmed items
+// without hashing or checking them, and cache-only hits never delete.
+func TestUploadRerunSkipsConfirmedItemsFromState(t *testing.T) {
+	dir := t.TempDir()
+	paths := writePhotos(t, filepath.Join(dir), 6)
+	lib := newFakeLibrary()
+	lib.add(t, paths[0])
+	opts := UploadOptions{
+		Api:         ApiOptions{Account: "user@example.com"},
+		HashThreads: 3, UploadThreads: 1,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true,
+	}
+	_, rec := startRun(lib, paths, opts)
+	rec.wait(t)
+	if ok, skipped, failed := countResults(rec.results); ok != 5 || skipped != 1 || failed != 0 {
+		t.Fatalf("first run: succeeded=%d skipped=%d failed=%d", ok, skipped, failed)
+	}
+
+	lookups := lib.lookups
+	opts.DeleteFromHost = true
+	_, rec = startRun(lib, paths, opts)
+	rec.wait(t)
+	for _, res := range rec.results {
+		if !res.Skipped || res.SkipCode != "state-cache" {
+			t.Fatalf("rerun result %+v", res)
+		}
+	}
+	if len(rec.results) != len(paths) || lib.lookups != lookups {
+		t.Fatalf("rerun: %d results, %d new lookups", len(rec.results), lib.lookups-lookups)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("cache-only hit deleted %s: %v", filepath.Base(p), err)
+		}
+	}
+}
 
 // A state file that cannot be opened (here: locked by another run) is one
 // run-level failure, not a failure per file.
