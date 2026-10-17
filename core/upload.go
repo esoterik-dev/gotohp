@@ -210,9 +210,16 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		return
 	}
 
+	state, err := openUploadState(opts)
+	if err != nil {
+		// One run-level failure, not one per file: no file was tried, and a
+		// per-file report would make --retry-report re-queue the whole import.
+		m.reporter.FileResult(FileUploadResult{IsError: true, Error: err, ErrorMessage: err.Error()})
+		m.finish()
+		return
+	}
 	checkApi, apiErr := m.newAPI(opts.Api)
-	state, stateErr := openUploadState(opts)
-	if err := errors.Join(apiErr, stateErr); err != nil {
+	if err := apiErr; err != nil {
 		state.close()
 		for _, item := range workItems {
 			path := uploadWorkPrimaryPath(item)

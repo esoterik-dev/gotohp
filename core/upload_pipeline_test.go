@@ -500,3 +500,21 @@ func TestUploadCtrlCDropsQueuedFiles(t *testing.T) {
 }
 
 // README: with --state-file --update-state, a rerun skips confirmed items
+
+// A state file that cannot be opened (here: locked by another run) is one
+// run-level failure, not a failure per file.
+func TestUploadStateOpenFailureIsOneError(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 5)
+	opts := UploadOptions{Api: ApiOptions{Account: "user@example.com"}, Threads: 1,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true}
+	held, err := openUploadState(opts.normalized())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.close()
+	_, rec := startRun(newFakeLibrary(), paths, opts)
+	rec.wait(t)
+	if len(rec.results) != 1 || !rec.results[0].IsError || rec.results[0].Path != "" {
+		t.Fatalf("results=%+v", rec.results)
+	}
+}

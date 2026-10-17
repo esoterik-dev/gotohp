@@ -64,7 +64,7 @@ func retryReportPaths(path string, pairLivePhotos bool, warn io.Writer) ([]strin
 	}
 	if missing := report.Total - len(results); missing > 0 {
 		if !report.Canceled {
-			return nil, fmt.Errorf("incomplete report lacks source paths; rerun the original sources instead")
+			return nil, fmt.Errorf("incomplete report lacks source paths; rerun the original sources instead, with --state-file to skip files already confirmed")
 		}
 		fmt.Fprintf(warn, "Warning: the report is from a canceled run; %d item(s) that never started are not retried. Rerun the original sources to include them.\n", missing)
 	}
