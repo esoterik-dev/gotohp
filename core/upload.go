@@ -604,6 +604,25 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		}
 	}
 
+	uploadPath := filePath
+	var staged *stagedFiles
+	if opts.StageLocal {
+		reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "staging",
+			FilePath: filePath,
+			FileName: fileName,
+			Message:  "Copying to local temporary storage...",
+		})
+		var err error
+		staged, err = stageFilesLocally(ctx, []string{filePath})
+		if err != nil {
+			return "", false, fmt.Errorf("stage file locally: %w", err)
+		}
+		defer staged.cleanup()
+		uploadPath = staged.paths[0]
+	}
+
 	// Stage 1: Hashing
 	reporter.ThreadStatus(ThreadStatus{
 		WorkerID: workerID,
@@ -613,7 +632,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		Message:  "Hashing...",
 	})
 
-	sha1_hash_bytes, err := CalculateSHA1(ctx, filePath)
+	sha1_hash_bytes, err := CalculateSHA1(ctx, uploadPath)
 	if err != nil {
 		return "", false, fmt.Errorf("error calculating hash file: %w", err)
 	}
@@ -648,7 +667,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 				Message:  "Already in library",
 			})
 			if opts.DeleteFromHost {
-				if err := os.Remove(filePath); err != nil {
+				if err := removeUploadedSource(filePath, staged); err != nil {
 					return mediakey, true, fmt.Errorf("file exists in library but failed to delete local copy: %w", err)
 				}
 			}
@@ -656,7 +675,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		}
 	}
 
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := os.Stat(uploadPath)
 	if err != nil {
 		return "", false, fmt.Errorf("error getting file info: %w", err)
 	}
@@ -691,7 +710,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		})
 	}
 
-	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, filePath, sha1_hash_bytes, fileSize, progressCallback)
+	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, uploadPath, sha1_hash_bytes, fileSize, progressCallback)
 	if err != nil {
 		return "", false, fmt.Errorf("error uploading file: %w", err)
 	}
@@ -709,7 +728,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		Message:  "Committing upload...",
 	})
 
-	mediaKey, err := api.CommitUpload(commitToken, fileInfo.Name(), sha1_hash_bytes, uploadTimestamp)
+	mediaKey, err := api.CommitUpload(commitToken, fileName, sha1_hash_bytes, uploadTimestamp)
 	if err != nil {
 		return "", false, fmt.Errorf("error committing file: %w", err)
 	}
@@ -719,12 +738,21 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 	}
 
 	if opts.DeleteFromHost {
-		if err := os.Remove(filePath); err != nil {
+		if err := removeUploadedSource(filePath, staged); err != nil {
 			return mediaKey, false, fmt.Errorf("uploaded successfully but failed to delete file: %w", err)
 		}
 	}
 
 	return mediaKey, false, nil
+}
+
+// removeUploadedSource deletes an uploaded file, refusing if it changed after
+// it was staged.
+func removeUploadedSource(path string, staged *stagedFiles) error {
+	if err := staged.verifySourcesUnchanged(); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, results chan<- FileUploadResult, opts UploadOptions) {
@@ -867,6 +895,7 @@ func uploadWorkItem(ctx context.Context, api *Api, item UploadWorkItem, opts Upl
 			Policy:                     buildLivePhotoCommitPolicy(api),
 			DeleteFromHost:             opts.DeleteFromHost,
 			SetDateFromFilename:        opts.SetDateFromFilename,
+			StageLocal:                 opts.StageLocal,
 			UpdateExistingPhotosToLive: opts.UpdateExistingPhotosToLive,
 		}, workerID, reporter)
 	default:
