@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
@@ -33,6 +34,23 @@ type RequestPolicy struct {
 	mu       sync.Mutex
 	next     time.Time
 	cooldown time.Time
+
+	// logger receives request, wait, 429 and retry events; see SetLogger.
+	logger *slog.Logger
+}
+
+// SetLogger sends the policy's events, and those of every Api built with it,
+// to logger: each request (debug), waits before a request (debug), 429
+// pauses (warn) and retries (info). Call it before the run starts.
+func (p *RequestPolicy) SetLogger(logger *slog.Logger) { p.logger = logger }
+
+var discardLogger = slog.New(slog.DiscardHandler)
+
+func (p *RequestPolicy) log() *slog.Logger {
+	if p == nil || p.logger == nil {
+		return discardLogger
+	}
+	return p.logger
 }
 
 // NewRequestPolicy validates and builds a policy. maxRetries excludes the
@@ -81,7 +99,12 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 			p.mu.Unlock()
 			return nil
 		}
+		reason := "pacing"
+		if ready.Equal(p.cooldown) {
+			reason = "429 pause"
+		}
 		p.mu.Unlock()
+		p.log().Debug("waiting before request", "reason", reason, "wait_ms", delay.Milliseconds())
 		if err := waitRequest(ctx, delay); err != nil {
 			return err
 		}
@@ -98,6 +121,13 @@ func (p *RequestPolicy) observe(resp *http.Response) {
 	defer p.mu.Unlock()
 	if until.After(p.cooldown) {
 		p.cooldown = until
+		host := ""
+		if resp.Request != nil {
+			host = resp.Request.URL.Hostname()
+		}
+		p.log().Warn("rate limited (HTTP 429): pausing all requests",
+			"host", host, "retry_after", resp.Header.Get("Retry-After"),
+			"pause_ms", until.Sub(now).Milliseconds(), "until", until.Format(time.RFC3339))
 	}
 }
 
@@ -201,6 +231,9 @@ func (a *Api) withRetry(ctx context.Context, config RetryConfig, op func(attempt
 		if !a.shouldRetry(err) {
 			return fmt.Errorf("failed after %d attempt(s): %w", attempt, err)
 		}
+		if attempt <= config.MaxRetries {
+			a.policy.log().Info("retrying request", "attempt", attempt+1, "of", config.MaxRetries+1, "error", err.Error())
+		}
 	}
 	return fmt.Errorf("failed after %d attempts: %w", config.MaxRetries+1, lastErr)
 }
@@ -213,8 +246,17 @@ func (a *Api) do(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
+	start := time.Now()
 	resp, err := a.client.Do(req)
-	if err == nil && a.policy != nil {
+	log := a.policy.log()
+	if err != nil {
+		log.Debug("request", "method", req.Method, "host", req.URL.Hostname(), "path", req.URL.Path,
+			"duration_ms", time.Since(start).Milliseconds(), "error", err.Error())
+		return resp, err
+	}
+	log.Debug("request", "method", req.Method, "host", req.URL.Hostname(), "path", req.URL.Path,
+		"status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
+	if a.policy != nil {
 		a.policy.observe(resp)
 	}
 	return resp, err
