@@ -366,20 +366,19 @@ func (m uploadModel) View() string {
 	return b.String()
 }
 
-// parseLogLevel converts a string log level to slog.Level
-func parseLogLevel(level string) slog.Level {
+// parseLogLevel converts a --log-level value to slog.Level.
+func parseLogLevel(level string) (slog.Level, error) {
 	switch strings.ToLower(level) {
 	case "debug":
-		return slog.LevelDebug
+		return slog.LevelDebug, nil
 	case "info":
-		return slog.LevelInfo
+		return slog.LevelInfo, nil
 	case "warn", "warning":
-		return slog.LevelWarn
+		return slog.LevelWarn, nil
 	case "error":
-		return slog.LevelError
+		return slog.LevelError, nil
 	default:
-		// Default to info for CLI
-		return slog.LevelInfo
+		return 0, fmt.Errorf("--log-level must be debug, info, warn or error, got %q", level)
 	}
 }
 
@@ -458,13 +457,14 @@ func (r teaReporter) AlbumError(albumErr core.AlbumError) {
 	})
 }
 
-func newLogger(level slog.Level) *slog.Logger {
-	if level > slog.LevelDebug {
-		// Anything above debug would only clutter the TUI; the JSON summary
-		// carries the outcome.
+// newLogger writes messages at level and above to w. With the TUI on there
+// is no log output at all: lines on stderr would draw over the progress
+// view, and the JSON summary carries the outcome.
+func newLogger(level slog.Level, w io.Writer, tui bool) *slog.Logger {
+	if tui {
 		return slog.New(slog.DiscardHandler)
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
 // runUpload runs the upload with already-resolved options and prints a JSON
@@ -488,13 +488,17 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	model.stop = func() { uploadManager.Stop() }
 	model.cancel = func() { uploadManager.Cancel() }
 	p := tea.NewProgram(model, programOptions...)
-	uploadManager = core.NewUploadManager(teaReporter{p: p}, newLogger(parseLogLevel(settings.logLevel)))
+	level, err := parseLogLevel(settings.logLevel)
+	if err != nil {
+		return err
+	}
+	useTUI := shouldUseTUI(settings)
+	uploadManager = core.NewUploadManager(teaReporter{p: p}, newLogger(level, os.Stderr, useTUI))
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	done := make(chan struct{})
 	defer close(done)
-	useTUI := shouldUseTUI(settings)
 	go forwardSignals(p, signals, done, useTUI)
 	go uploadManager.Upload(paths, opts)
 
