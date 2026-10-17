@@ -16,6 +16,33 @@ type preparedFile struct {
 	upload string      // file the upload reads: the staged copy or the source
 	hash   []byte      // SHA-1 of upload
 	info   os.FileInfo // source info when it was hashed or staged
+	// checked is set once the remote duplicate check has run; remoteKey is
+	// then the existing library item, or empty when the file is new.
+	checked   bool
+	remoteKey string
+}
+
+// remoteHashFinder is the part of *Api the duplicate check uses.
+type remoteHashFinder interface {
+	FindRemoteMediaByHash(ctx context.Context, hash []byte) (string, error)
+}
+
+// checkRemoteDuplicate looks up f's hash in the library.
+func checkRemoteDuplicate(ctx context.Context, api remoteHashFinder, f *preparedFile, workerID int, reporter UploadReporter) error {
+	reporter.ThreadStatus(ThreadStatus{
+		WorkerID: workerID,
+		Status:   "checking",
+		FilePath: f.source,
+		FileName: filepath.Base(f.source),
+		Message:  "Checking if file exists in library...",
+	})
+	key, err := api.FindRemoteMediaByHash(ctx, f.hash)
+	if err != nil {
+		// Uploading without a completed duplicate check risks a duplicate item.
+		return fmt.Errorf("remote duplicate check failed; upload deferred: %w", err)
+	}
+	f.checked, f.remoteKey = true, key
+	return nil
 }
 
 // unchanged fails if the source was replaced or modified since it was
@@ -103,17 +130,27 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 	return p
 }
 
-// prepareUploads hashes items on opts.HashThreads workers. The returned
-// queue holds at most opts.UploadThreads prepared items, so hashing runs
-// only a little ahead of uploading. Every item yields exactly one
-// preparedUpload, including after cancellation.
-func prepareUploads(ctx context.Context, items []UploadWorkItem, opts UploadOptions, reporter UploadReporter) <-chan preparedUpload {
+// prepareUploads hashes items on opts.HashThreads workers. With a non-nil
+// finder, the same workers also run the duplicate check for single files, and
+// a file already in the library is passed to finish on that worker instead
+// of being queued. The returned queue holds at most opts.UploadThreads
+// prepared items, so hashing runs only a little ahead of uploading. Every
+// started item yields exactly one preparedUpload or finish call, including
+// after cancellation; canceling ctx stops starting new items.
+func prepareUploads(ctx context.Context, items []UploadWorkItem, opts UploadOptions, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
 	jobs := make(chan UploadWorkItem)
 	ready := make(chan preparedUpload, opts.UploadThreads)
 	go func() {
 		defer close(jobs)
 		for _, item := range items {
-			jobs <- item
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case jobs <- item:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	var wg sync.WaitGroup
@@ -124,8 +161,23 @@ func prepareUploads(ctx context.Context, items []UploadWorkItem, opts UploadOpti
 			defer wg.Done()
 			for item := range jobs {
 				prepared := prepareUpload(ctx, item, opts, workerID, reporter)
-				reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
+				if finder != nil && prepared.err == nil && item.Kind == UploadWorkSingle && !opts.ForceUpload {
+					prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)
+					if prepared.err == nil && prepared.files[0].remoteKey != "" {
+						finish(workerID, prepared)
+						reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
+						continue
+					}
+				}
+				reporter.ThreadStatus(ThreadStatus{
+					WorkerID: workerID,
+					Status:   "queued",
+					FilePath: uploadWorkPrimaryPath(item),
+					FileName: filepath.Base(uploadWorkPrimaryPath(item)),
+					Message:  "Waiting for an upload worker...",
+				})
 				ready <- prepared
+				reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
 			}
 			reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Finished"})
 		}()
