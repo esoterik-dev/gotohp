@@ -3,9 +3,11 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -266,7 +268,7 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 		"User-Agent":              a.userAgent,
 		"Authorization":           "Bearer " + bearerToken,
 		"X-Goog-Hash":             "sha1=" + shaHashB64,
-		"X-Upload-Content-Length": strconv.Itoa(int(fileSize)),
+		"X-Upload-Content-Length": strconv.FormatInt(fileSize, 10),
 	}
 
 	// Create the request
@@ -294,7 +296,7 @@ func (a *Api) GetUploadToken(shaHashB64 string, fileSize int64) (string, error) 
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		return "", &uploadHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	// Get the upload token from headers
@@ -389,31 +391,54 @@ func (a *Api) FindRemoteMediaByHash(shaHash []byte) (string, error) {
 // attempt is 1-based (1 = first attempt, 2 = first retry, etc.)
 type UploadProgressCallback func(bytesUploaded, bytesTotal int64, attempt int)
 
-func (a *Api) UploadFile(ctx context.Context, filePath string, uploadToken string) (ScottyFinalizeToken, error) {
-	return a.UploadFileWithProgress(ctx, filePath, uploadToken, nil)
+type uploadHTTPError struct {
+	statusCode int
+	body       string
 }
 
-func (a *Api) UploadFileWithProgress(ctx context.Context, filePath string, uploadToken string, onProgress UploadProgressCallback) (ScottyFinalizeToken, error) {
-	// Get file size first (needed for progress tracking)
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return ScottyFinalizeToken{}, fmt.Errorf("error getting file info: %w", err)
+func (e *uploadHTTPError) Error() string {
+	return fmt.Sprintf("request failed with status %d: %s", e.statusCode, e.body)
+}
+
+func shouldRetryUploadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
-	fileSize := fileInfo.Size()
 
-	uploadURL := "https://photos.googleapis.com/data/upload/uploadmedia/interactive?upload_id=" + uploadToken
+	var httpErr *uploadHTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.statusCode == http.StatusTooManyRequests || httpErr.statusCode >= 500 {
+			return true
+		}
+
+		// A stale or interrupted resumable session can make the server compare the
+		// declared SHA-1 with a different request body. A new upload session and a
+		// fresh file read are safe for this specific 400 response.
+		return httpErr.statusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(httpErr.body), "checksum from header")
+	}
+
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+// UploadFileWithHashAndProgress creates a new resumable upload session for
+// each retry. The hash is sent when creating the session, so the request body
+// and the declared checksum are always read from the same stable file.
+func (a *Api) UploadFileWithHashAndProgress(
+	ctx context.Context,
+	filePath string,
+	sha1Hash []byte,
+	fileSize int64,
+	onProgress UploadProgressCallback,
+) (ScottyFinalizeToken, error) {
+	shaHashB64 := base64.StdEncoding.EncodeToString(sha1Hash)
 	retryConfig := DefaultRetryConfig()
-
 	var lastErr error
 	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
-		attemptNum := attempt + 1 // 1-based for display
-
-		// Check context before each attempt
+		attemptNum := attempt + 1
 		if ctx.Err() != nil {
 			return ScottyFinalizeToken{}, ctx.Err()
 		}
-
-		// Wait before retry (skip on first attempt)
 		if attempt > 0 {
 			delay := CalculateBackoff(attempt-1, retryConfig)
 			select {
@@ -423,55 +448,78 @@ func (a *Api) UploadFileWithProgress(ctx context.Context, filePath string, uploa
 			}
 		}
 
-		// Signal start of this attempt (resets progress on retry)
-		if onProgress != nil {
-			onProgress(0, fileSize, attemptNum)
+		var result ScottyFinalizeToken
+		uploadToken, err := a.GetUploadToken(shaHashB64, fileSize)
+		if err == nil {
+			result, err = a.uploadFileAttempt(ctx, filePath, uploadToken, fileSize, onProgress, attemptNum)
 		}
-
-		// Open file fresh for each attempt - this is the key to not loading into memory
-		file, err := os.Open(filePath)
-		if err != nil {
-			return ScottyFinalizeToken{}, fmt.Errorf("error opening file: %w", err)
-		}
-
-		// Wrap file in progress reader if callback provided
-		var reader io.Reader = file
-		if onProgress != nil {
-			reader = NewProgressReader(file, fileSize, func(bytesRead, total int64) {
-				onProgress(bytesRead, total, attemptNum)
-			})
-		}
-
-		result, err := a.doUploadRequest(ctx, uploadURL, reader)
-		closeErr := file.Close() // Close file after request completes (success or fail)
-		if err == nil && closeErr != nil {
-			return ScottyFinalizeToken{}, fmt.Errorf("error closing file: %w", closeErr)
-		}
-
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
-
-		// Don't retry on context cancellation
 		if ctx.Err() != nil {
 			return ScottyFinalizeToken{}, ctx.Err()
+		}
+		if !shouldRetryUploadError(err) {
+			return ScottyFinalizeToken{}, fmt.Errorf("upload failed after %d attempt(s): %w", attemptNum, err)
 		}
 	}
 
 	return ScottyFinalizeToken{}, fmt.Errorf("upload failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
 }
 
+func (a *Api) uploadFileAttempt(
+	ctx context.Context,
+	filePath string,
+	uploadToken string,
+	fileSize int64,
+	onProgress UploadProgressCallback,
+	attemptNum int,
+) (ScottyFinalizeToken, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return ScottyFinalizeToken{}, fmt.Errorf("error getting file info: %w", err)
+	}
+	if fileInfo.Size() != fileSize {
+		return ScottyFinalizeToken{}, fmt.Errorf("file size changed during upload: got %d bytes, expected %d", fileInfo.Size(), fileSize)
+	}
+
+	if onProgress != nil {
+		onProgress(0, fileSize, attemptNum)
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ScottyFinalizeToken{}, fmt.Errorf("error opening file: %w", err)
+	}
+	var reader io.Reader = file
+	if onProgress != nil {
+		reader = NewProgressReader(file, fileSize, func(bytesRead, total int64) {
+			onProgress(bytesRead, total, attemptNum)
+		})
+	}
+
+	uploadURL := "https://photos.googleapis.com/data/upload/uploadmedia/interactive?upload_id=" + uploadToken
+	result, err := a.doUploadRequest(ctx, uploadURL, reader, fileSize)
+	closeErr := file.Close()
+	if err == nil && closeErr != nil {
+		return ScottyFinalizeToken{}, fmt.Errorf("error closing file: %w", closeErr)
+	}
+	return result, err
+}
+
 // doUploadRequest performs a single upload attempt
-func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.Reader) (ScottyFinalizeToken, error) {
+func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.Reader, fileSize int64) (ScottyFinalizeToken, error) {
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, reader)
 	if err != nil {
 		return ScottyFinalizeToken{}, fmt.Errorf("error creating request: %w", err)
 	}
 
-	// Use chunked transfer encoding (don't set ContentLength)
-	req.ContentLength = -1
+	// The upload endpoint validates the bytes against the hash supplied when
+	// creating the upload session. Send the exact length rather than chunked
+	// transfer encoding so it receives the request body it expects.
+	req.ContentLength = fileSize
 
 	bearerToken, err := a.BearerToken()
 	if err != nil {
@@ -480,6 +528,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 
 	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("Accept-Language", a.language)
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("User-Agent", a.userAgent)
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 
@@ -492,7 +541,7 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 	// Check for non-success status codes (includes retryable 5xx/429 and non-retryable 4xx)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return ScottyFinalizeToken{}, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
+		return ScottyFinalizeToken{}, &uploadHTTPError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	bodyBytes, err := ReadResponseBody(resp)
