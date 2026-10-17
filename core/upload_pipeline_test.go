@@ -344,3 +344,67 @@ func TestUploadThreadsAloneUsesOnePool(t *testing.T) {
 		t.Fatal("no worker uploaded")
 	}
 }
+
+// README: the first Ctrl+C (Stop) starts no new files and lets in-progress
+// files finish; they are uploaded, not reported as canceled.
+func TestUploadStopLetsInFlightFilesFinish(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 30)
+	lib := newFakeLibrary()
+	lib.uploadGate = make(chan struct{})
+	lib.uploadStarted = make(chan string, len(paths))
+	m, rec := startRun(lib, paths, UploadOptions{HashThreads: 2, UploadThreads: 1})
+	select {
+	case <-lib.uploadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upload started")
+	}
+	m.Stop()
+	close(lib.uploadGate)
+	rec.wait(t)
+	ok, skipped, failed := countResults(rec.results)
+	if failed != 0 || skipped != 0 || ok == 0 {
+		t.Fatalf("succeeded=%d skipped=%d failed=%d; in-flight files must finish", ok, skipped, failed)
+	}
+	// In flight at Stop: one upload, one queued, one per hash worker.
+	if ok > 1+1+2 {
+		t.Fatalf("%d files uploaded after Stop; new files must not start", ok)
+	}
+}
+
+// After Ctrl+C, a file already found in the library keeps its result.
+func TestCanceledRunKeepsKnownDuplicate(t *testing.T) {
+	path := writePhotos(t, t.TempDir(), 1)[0]
+	rec := newRunRecorder()
+	m := NewUploadManager(rec, nil)
+	m.stop, m.cancel = make(chan struct{}), make(chan struct{})
+	m.Cancel()
+	item := UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: path}}
+	prepared := prepareUpload(context.Background(), item, UploadOptions{}, 0, NopReporter{})
+	prepared.files[0].checked, prepared.files[0].remoteKey = true, "existing"
+	results := make(chan FileUploadResult, 1)
+	m.finishPrepared(0, newFakeLibrary(), nil, prepared, results, UploadOptions{})
+	if res := <-results; !res.Skipped || res.MediaKey != "existing" {
+		t.Fatalf("known duplicate reported as %+v", res)
+	}
+}
+
+// A duplicate whose local copy cannot be deleted is still a skip, with a
+// cleanup warning, not a successful upload.
+func TestUploadDuplicateWithFailedDeleteIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := writePhotos(t, dir, 1)[0]
+	lib := newFakeLibrary()
+	lib.add(t, path)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	_, rec := startRun(lib, []string{path}, UploadOptions{Threads: 1, DeleteFromHost: true})
+	rec.wait(t)
+	if len(rec.results) != 1 || !rec.results[0].Skipped || rec.results[0].SkipCode != "remote-duplicate" {
+		t.Fatalf("results=%+v", rec.results)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("source should still exist: %v", err)
+	}
+}
