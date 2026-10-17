@@ -154,7 +154,17 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 // items; canceling ctx also aborts hashing in progress.
 func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWorkItem, opts UploadOptions, finder remoteHashFinder, reporter UploadReporter, finish func(workerID int, p preparedUpload)) <-chan preparedUpload {
 	jobs := make(chan UploadWorkItem)
+	// With --stage-local every queued item holds a temporary copy, so the
+	// queue is bounded and hash workers wait for upload workers. Otherwise a
+	// queued item is only paths and a hash: hash workers hand it off and keep
+	// checking ahead, so duplicates never wait behind new files.
+	bounded := opts.StageLocal
 	ready := make(chan preparedUpload, opts.UploadThreads)
+	queued := ready // what hash workers send to
+	if !bounded {
+		ready = make(chan preparedUpload)
+		queued = make(chan preparedUpload)
+	}
 	go func() {
 		defer close(jobs)
 		for _, item := range items {
@@ -186,25 +196,59 @@ func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWor
 				if finder != nil && prepared.err == nil && item.Kind == UploadWorkSingle && !opts.ForceUpload {
 					prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)
 				}
+				// Finish on the hash worker whatever needs no upload worker: a
+				// duplicate, a failure, or every item when there is one pool.
 				known := prepared.err == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
-				if known || opts.UploadThreads == 0 {
+				if known || prepared.err != nil || opts.UploadThreads == 0 {
 					finish(workerID, prepared)
 					reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
 					continue
 				}
-				reporter.ThreadStatus(ThreadStatus{
-					WorkerID: workerID,
-					Status:   "queued",
-					FilePath: uploadWorkPrimaryPath(item),
-					FileName: filepath.Base(uploadWorkPrimaryPath(item)),
-					Message:  "Waiting for an upload worker...",
-				})
-				ready <- prepared
+				if bounded {
+					// Waiting here is the point: it caps the temporary copies.
+					reporter.ThreadStatus(ThreadStatus{
+						WorkerID: workerID,
+						Status:   "queued",
+						FilePath: uploadWorkPrimaryPath(item),
+						FileName: filepath.Base(uploadWorkPrimaryPath(item)),
+						Message:  "Waiting for an upload worker...",
+					})
+				}
+				queued <- prepared
 				reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})
 			}
 			reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Finished"})
 		}()
 	}
-	go func() { wg.Wait(); close(ready) }()
+	go func() { wg.Wait(); close(queued) }()
+	if !bounded {
+		go unboundedQueue(queued, ready)
+	}
 	return ready
+}
+
+// unboundedQueue forwards everything from in to out in order, buffering as
+// much as needed, so senders on in never wait for receivers on out. out is
+// closed after in is closed and drained.
+func unboundedQueue(in <-chan preparedUpload, out chan<- preparedUpload) {
+	defer close(out)
+	var pending []preparedUpload
+	for in != nil || len(pending) > 0 {
+		var send chan<- preparedUpload
+		var next preparedUpload
+		if len(pending) > 0 {
+			send, next = out, pending[0]
+		}
+		select {
+		case p, ok := <-in:
+			if !ok {
+				in = nil
+				continue
+			}
+			pending = append(pending, p)
+		case send <- next:
+			pending[0] = preparedUpload{}
+			pending = pending[1:]
+		}
+	}
 }

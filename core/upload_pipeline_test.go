@@ -442,3 +442,59 @@ func TestUploadStagedCopyIgnoresSourceChange(t *testing.T) {
 		}
 	}
 }
+
+// README: without --stage-local, hash workers keep checking ahead, so
+// duplicates listed after new files do not wait for those uploads.
+func TestUploadDuplicatesBehindNewFilesDoNotWait(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 26) // IMG_000..005 new, 006..025 known
+	lib := newFakeLibrary()
+	for _, p := range paths[6:] {
+		lib.add(t, p)
+	}
+	lib.uploadGate = make(chan struct{})
+	_, rec := startRun(lib, paths, UploadOptions{HashThreads: 2, UploadThreads: 1})
+	for range 20 {
+		select {
+		case res := <-rec.resultCh:
+			if !res.Skipped {
+				t.Fatalf("unexpected result while uploads are blocked: %+v", res)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("duplicates waited behind new files")
+		}
+	}
+	close(lib.uploadGate)
+	rec.wait(t)
+	if ok, skipped, failed := countResults(rec.results); ok != 6 || skipped != 20 || failed != 0 {
+		t.Fatalf("succeeded=%d skipped=%d failed=%d", ok, skipped, failed)
+	}
+}
+
+// README: after Ctrl+C, files still waiting for an upload worker are not
+// uploaded and are left out of the report, like files never started; only
+// the in-flight upload finishes (Stop) or is reported canceled (Cancel).
+func TestUploadCtrlCDropsQueuedFiles(t *testing.T) {
+	for _, abort := range []bool{false, true} {
+		paths := writePhotos(t, t.TempDir(), 30)
+		lib := newFakeLibrary()
+		lib.uploadGate = make(chan struct{})
+		lib.uploadStarted = make(chan string, len(paths))
+		m, rec := startRun(lib, paths, UploadOptions{HashThreads: 4, UploadThreads: 1})
+		<-lib.uploadStarted
+		time.Sleep(200 * time.Millisecond) // let the hash workers queue the rest
+		if abort {
+			m.Cancel()
+		} else {
+			m.Stop()
+			close(lib.uploadGate)
+		}
+		rec.wait(t)
+		ok, skipped, failed := countResults(rec.results)
+		if abort && (ok != 0 || failed != 1) || !abort && (ok != 1 || failed != 0) || skipped != 0 {
+			t.Fatalf("abort=%v: succeeded=%d skipped=%d failed=%d", abort, ok, skipped, failed)
+		}
+		if lib.uploads != 1 {
+			t.Fatalf("abort=%v: %d uploads; queued files must not start", abort, lib.uploads)
+		}
+	}
+}
