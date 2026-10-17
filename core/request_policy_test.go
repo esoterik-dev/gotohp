@@ -85,6 +85,27 @@ func TestRequestHonoursCallerContext(t *testing.T) {
 	}
 }
 
+// A token refresh waits behind a 429 pause like any request, so it must
+// honour the caller's context too; otherwise Ctrl+C hangs for the pause.
+func TestTokenRefreshHonoursCallerContext(t *testing.T) {
+	policy := mustPolicy(t, 0, true, 0)
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}))
+	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "stale", "Expiry": "0"},
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("auth request sent during cooldown")
+			return statusResponse(200, nil), nil
+		})}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := api.FindRemoteMediaByHash(ctx, make([]byte, 20)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller deadline ignored: %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("token refresh waited out the pause")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

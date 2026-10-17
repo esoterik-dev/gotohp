@@ -296,7 +296,7 @@ func validateGooglePhotosCredential(credential string, proxy string) error {
 		return err
 	}
 	api.client.CheckRedirect = rejectGoogleAuthRedirect
-	if _, err := api.BearerToken(); err != nil {
+	if _, err := api.BearerToken(context.Background()); err != nil {
 		return err
 	}
 

@@ -34,7 +34,7 @@ func newUploadCommand() *cobra.Command {
 	f.IntP("threads", "t", core.DefaultPreferences.UploadThreads, "number of upload threads")
 	f.Bool("retry-429", true, "retry HTTP 429 responses (disable with --retry-429=false)")
 	f.Int("max-retries", core.DefaultMaxRetries, "retries after the initial attempt for transient request failures (0 disables)")
-	f.Int("requests-per-minute", core.DefaultRequestsPerMinute, "shared Photos RPC rate limit (0 disables proactive limiting)")
+	f.Int("requests-per-minute", core.DefaultRequestsPerMinute, "cap Photos RPCs per minute across all workers (default 0: no cap; a 429 always pauses the run)")
 	f.BoolP("force", "f", false, "upload even if the file already exists in the library")
 	f.BoolP("delete", "d", false, "delete from host after upload")
 	f.Bool("disable-filter", false, "disable file type filtering")
