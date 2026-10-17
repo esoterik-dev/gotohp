@@ -400,9 +400,18 @@ func (e *uploadHTTPError) Error() string {
 	return fmt.Sprintf("request failed with status %d: %s", e.statusCode, e.body)
 }
 
+// errBadUploadResponse marks a 2xx upload response whose body could not be
+// read or parsed.
+var errBadUploadResponse = errors.New("unreadable upload response")
+
 func shouldRetryUploadError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	// A truncated or garbled response committed nothing, and every retry
+	// opens a new upload session, so retrying is safe.
+	if errors.Is(err, errBadUploadResponse) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
 
 	var httpErr *uploadHTTPError
@@ -546,11 +555,11 @@ func (a *Api) doUploadRequest(ctx context.Context, uploadURL string, reader io.R
 
 	bodyBytes, err := ReadResponseBody(resp)
 	if err != nil {
-		return ScottyFinalizeToken{}, fmt.Errorf("failed to read response body: %w", err)
+		return ScottyFinalizeToken{}, fmt.Errorf("failed to read response body: %w: %w", errBadUploadResponse, err)
 	}
 	token, err := ParseScottyFinalizeToken(bodyBytes)
 	if err != nil {
-		return ScottyFinalizeToken{}, fmt.Errorf("invalid upload finalize response: %w", err)
+		return ScottyFinalizeToken{}, fmt.Errorf("invalid upload finalize response: %w: %w", errBadUploadResponse, err)
 	}
 	return token, nil
 }

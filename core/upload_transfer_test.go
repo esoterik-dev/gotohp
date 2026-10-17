@@ -23,6 +23,8 @@ func TestUploadRetryClassification(t *testing.T) {
 		// Body captured from a real failed upload (gp-run reports, 2026-09).
 		{&uploadHTTPError{statusCode: 400, body: "Checksum from header does not match received payload content."}, true},
 		{&uploadHTTPError{statusCode: 400, body: "invalid media"}, false},
+		{fmt.Errorf("invalid upload finalize response: %w: %w", errBadUploadResponse, errors.New("bad tag")), true},
+		{fmt.Errorf("read: %w", io.ErrUnexpectedEOF), true},
 		{context.Canceled, false}, {errors.New("invalid response"), false},
 	} {
 		if got := shouldRetryUploadError(tc.err); got != tc.want {
