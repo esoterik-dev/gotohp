@@ -1,0 +1,186 @@
+name: CI
+
+on:
+  # All base branches: PRs in this repo are stacked on each other.
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (fmt, vet, test, build)
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(git ls-files -z -- '*.go' ':!:frontend/node_modules/**' | xargs -0 -r gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted (run gofmt -w):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet -tags cli ./...
+
+      # core and internal/cli do not depend on Wails, so no GTK/WebKit
+      # libraries are needed. -race requires cgo.
+      - name: Test
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./core/... ./internal/cli/...
+
+      - name: Build CLI
+        run: go build -tags cli -trimpath -o /dev/null .
+
+  cli-cross:
+    name: CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "0"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -tags cli -count=1 ./core/... ./internal/cli/...
+
+      - name: Build CLI
+        run: go build -tags cli -trimpath -o "$RUNNER_TEMP/gotohp-cli" .
+
+  commits:
+    name: Every commit vets and builds
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Check out the PR head, not the synthetic merge ref, so that
+      # BASE_SHA..HEAD_SHA is exactly the PR's own commits.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet and build each commit
+        run: |
+          failed=()
+          for commit in $(git rev-list --reverse "$BASE_SHA..$HEAD_SHA"); do
+            subject=$(git log -1 --format='%h %s' "$commit")
+            echo "::group::$subject"
+            git checkout --quiet --detach "$commit"
+            if go vet -tags cli ./... && go build -tags cli -trimpath -o /dev/null .; then
+              echo "ok: $subject"
+            else
+              echo "::error::Commit $subject fails go vet or the CLI build"
+              failed+=("$subject")
+            fi
+            echo "::endgroup::"
+          done
+          git checkout --quiet --detach "$HEAD_SHA"
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "Failing commits:"
+            printf '  %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false # golangci-lint-action keeps its own cache
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          # Report only issues introduced by the change, so existing
+          # upstream code does not fail every PR.
+          only-new-issues: true
+          args: --build-tags=cli
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # shellcheck is preinstalled on ubuntu runners.
+      - name: Check shell scripts
+        run: |
+          shopt -s globstar nullglob
+          scripts=(scripts/**/*.sh)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No scripts/**/*.sh files; nothing to check."
+            exit 0
+          fi
+          shellcheck --version
+          shellcheck "${scripts[@]}"
+
+  frontend:
+    name: Frontend (lint, type-check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - name: Type-check
+        run: npx vue-tsc --noEmit
