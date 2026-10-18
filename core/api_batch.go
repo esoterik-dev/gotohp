@@ -22,6 +22,15 @@ func (a *Api) FindRemoteMediaByHashes(ctx context.Context, hashes [][]byte) (map
 		matches, err = decodeHashBatch(body)
 		return err
 	})
+	if err == nil {
+		found := 0
+		for _, match := range matches {
+			if match.PrimaryMediaKey != "" || match.RelatedMediaKey != "" {
+				found++
+			}
+		}
+		a.policy.log().Debug("hash lookup batch", "hashes", len(hashes), "found", found)
+	}
 	return matches, err
 }
 

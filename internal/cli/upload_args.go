@@ -47,7 +47,7 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("update-existing-photos-to-live", false, "attach matching MOV files to existing photos")
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
 	f.StringP("log-level", "l", "info", "stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error; info logs each uploaded file")
-	f.String("log-file", "", "write the run's debug log to PATH (default: a new file in ~/.local/state/gotohp/logs)")
+	addRunLogFlags(cmd)
 	f.Bool("no-tui", false, "disable the interactive progress UI")
 	f.String("state-file", "", "read confirmed upload state from PATH")
 	f.Bool("update-state", false, "checkpoint confirmed uploads to --state-file")
@@ -64,23 +64,52 @@ func newUploadCommand() *cobra.Command {
 
 // uploadRunSettings holds CLI-only settings that are not part of UploadOptions.
 type uploadRunSettings struct {
-	logLevel   string
-	logFile    string // "" means a new file at defaultRunLogPath
 	noTUI      bool
 	reportFile string
 	version    string
 }
 
+// runUploadCommand opens the run's debug log before anything else, so the
+// log also records warnings and errors that end a run before it uploads.
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
+	f := cmd.Flags()
+	logLevel, _ := f.GetString("log-level")
+	level, err := parseLogLevel(logLevel)
+	if err != nil {
+		return err
+	}
+	noTUI, _ := f.GetBool("no-tui")
+	settings := uploadRunSettings{noTUI: noTUI, version: cmd.Root().Version}
+	settings.reportFile, _ = f.GetString("report-file")
+	runLog := openRunLog(f, "upload", newLogger(level, os.Stderr, shouldUseTUI(settings)))
+	defer runLog.close()
+	retryReport, _ := f.GetString("retry-report")
+	workingDir, _ := os.Getwd()
+	runLog.Info("upload command", "version", settings.version, "pid", os.Getpid(),
+		"working_directory", workingDir, "paths", paths, "retry_report", retryReport)
+	err = uploadCommand(cmd, paths, settings, runLog)
+	if err != nil {
+		// An exitError only carries the exit status of a finished run.
+		var exit exitError
+		if !errorsAs(err, &exit) {
+			runLog.Error("upload failed", "error", err.Error())
+		}
+	}
+	runLog.printPath()
+	return err
+}
+
+func uploadCommand(cmd *cobra.Command, paths []string, settings uploadRunSettings, runLog *runLog) error {
+	warn := runLog.warnings(cmd.ErrOrStderr())
 	retry, _ := cmd.Flags().GetString("retry-report")
 	if retry != "" {
 		var err error
 		pair, _ := cmd.Flags().GetBool("pair-live-photos")
-		paths, err = retryReportPaths(retry, pair, cmd.ErrOrStderr())
+		paths, err = retryReportPaths(retry, pair, warn)
 		if err != nil {
 			return err
 		}
-		paths = existingRetryPaths(paths, cmd.ErrOrStderr())
+		paths = existingRetryPaths(paths, warn)
 	}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
@@ -112,25 +141,14 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	opts.Api.Policy = policy
 
 	if retry != "" && len(paths) == 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "No failed non-skipped files to retry")
+		fmt.Fprintln(warn, "No failed non-skipped files to retry")
 		// Still write the (empty) summary, so --report-file is never stale.
 		model := initialModel()
 		model.workingDir, _ = os.Getwd()
-		reportFile, _ := f.GetString("report-file")
-		return finishUpload(model, cmd.OutOrStdout(), reportFile)
+		model.logFile = runLog.path
+		return finishUpload(model, cmd.OutOrStdout(), settings.reportFile)
 	}
-
-	logLevel, _ := f.GetString("log-level")
-	noTUI, _ := f.GetBool("no-tui")
-	reportFile, _ := f.GetString("report-file")
-	logFile, _ := f.GetString("log-file")
-	return runUpload(paths, opts, uploadRunSettings{
-		logLevel:   logLevel,
-		logFile:    logFile,
-		noTUI:      noTUI,
-		reportFile: reportFile,
-		version:    cmd.Root().Version,
-	})
+	return runUpload(paths, opts, settings, runLog)
 }
 
 // uploadOptionsFromFlags builds run options from defaults plus the parsed flags.

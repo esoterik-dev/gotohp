@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -111,10 +112,30 @@ func newVerifyLivePhotosCommand() *cobra.Command {
 	addRequestPolicyFlags(f)
 	f.Int("limit", 0, "verify only the first N pairs (0 means all)")
 	f.String("report-file", "", "write the verification JSON report to PATH")
+	addRunLogFlags(cmd)
 	return cmd
 }
 
+// runVerifyLivePhotosCommand opens the run's debug log first, like upload.
+// Nothing new is printed on stderr; the log only goes to its file.
 func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
+	runLog := openRunLog(cmd.Flags(), "verify-live-photos", slog.New(slog.DiscardHandler))
+	defer runLog.close()
+	workingDir, _ := os.Getwd()
+	runLog.Info("verify-live-photos command", "version", cmd.Root().Version, "pid", os.Getpid(),
+		"working_directory", workingDir, "upload_report", args[0])
+	err := verifyLivePhotosCommand(cmd, args, runLog)
+	if err != nil {
+		var exit exitError
+		if !errorsAs(err, &exit) {
+			runLog.Error("verify-live-photos failed", "error", err.Error())
+		}
+	}
+	runLog.printPath()
+	return err
+}
+
+func verifyLivePhotosCommand(cmd *cobra.Command, args []string, runLog *runLog) error {
 	reportPath := args[0]
 	f := cmd.Flags()
 	sourceRoot, _ := f.GetString("source-root")
@@ -158,6 +179,9 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	policy.SetLogger(runLog.Logger)
+	runLog.Info("verify started", "pairs", len(pairs), "source_root", sourceRoot, "threads", threads,
+		"limit", limit, "account", account, "report_file", reportFile)
 	api, err := core.NewApi(core.ApiOptions{Account: account, Proxy: proxy, Policy: policy})
 	if err != nil {
 		return fmt.Errorf("create Google Photos API client: %w", err)
@@ -170,11 +194,18 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	out := cmd.ErrOrStderr()
-	results := verifyPairs(ctx, pairs, api, threads, newVerifyProgress(out, len(pairs)))
+	progress := newVerifyProgress(out, len(pairs))
+	results := verifyPairs(ctx, pairs, api, threads, func(item livePhotoVerificationItem) {
+		runLog.Info("pair checked", "index", item.Index, "photo", item.PhotoPath, "video", item.VideoPath,
+			"status", item.Status, "error", item.Error,
+			"photo_media_key", item.PhotoMediaKey, "video_media_key", item.VideoMediaKey)
+		progress()
+	})
 	stop()
 
 	report := buildLivePhotoVerificationReport(reportPath, sourceRoot, results)
 	report.Canceled = ctx.Err() != nil
+	runLog.Info("verify finished", "total", report.TotalPairs, "verified", report.VerifiedPairs, "canceled", report.Canceled)
 	if reportFile != "" {
 		if err := writeLivePhotoVerificationReport(reportFile, report); err != nil {
 			return err
@@ -192,7 +223,7 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 
 // verifyPairs checks pairs on threads workers. Pairs not started before ctx
 // is canceled are reported as canceled, so the report stays complete.
-func verifyPairs(ctx context.Context, pairs []verifyPairInput, api remoteMatchAPI, threads int, progress func()) []livePhotoVerificationItem {
+func verifyPairs(ctx context.Context, pairs []verifyPairInput, api remoteMatchAPI, threads int, checked func(livePhotoVerificationItem)) []livePhotoVerificationItem {
 	results := make([]livePhotoVerificationItem, len(pairs))
 	jobs := make(chan verifyPairInput)
 	var workers sync.WaitGroup
@@ -202,7 +233,7 @@ func verifyPairs(ctx context.Context, pairs []verifyPairInput, api remoteMatchAP
 			defer workers.Done()
 			for pair := range jobs {
 				results[pair.Index] = verifyLivePhotoPair(ctx, pair, api)
-				progress()
+				checked(results[pair.Index])
 			}
 		}()
 	}

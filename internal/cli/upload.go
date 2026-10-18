@@ -521,33 +521,9 @@ func newLogger(level slog.Level, w io.Writer, tui bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
-// newRunLogger opens the debug log file, which every run writes. It returns
-// core's logger (stderr as newLogger decided, plus the file), the file-only
-// logger for the run's own events, which stay off stderr, and the file's
-// path. If the file cannot be created the run continues without it, with a
-// warning on stderr.
-func newRunLogger(settings uploadRunSettings, stderr *slog.Logger) (*slog.Logger, *slog.Logger, func(), string) {
-	none := slog.New(slog.DiscardHandler)
-	path := settings.logFile
-	if path == "" {
-		var err error
-		if path, err = defaultRunLogPath(time.Now()); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: no debug log for this run: %v\n", err)
-			return stderr, none, func() {}, ""
-		}
-	}
-	file, handler, err := openRunLog(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: no debug log for this run: %v\n", err)
-		return stderr, none, func() {}, ""
-	}
-	logger := slog.New(slog.NewMultiHandler(stderr.Handler(), handler))
-	return logger, slog.New(handler), func() { _ = file.Close() }, path
-}
-
 // runUpload runs the upload with already-resolved options and prints a JSON
 // summary when it completes.
-func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettings) error {
+func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettings, runLog *runLog) error {
 	model := initialModel()
 	model.workingDir, _ = os.Getwd()
 	programOptions := []tea.ProgramOption{tea.WithoutSignalHandler()}
@@ -562,16 +538,11 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	if opts.AlbumAutoMode {
 		model.requestedAlbum = "AUTO"
 	}
-	level, err := parseLogLevel(settings.logLevel)
-	if err != nil {
-		return err
-	}
 	useTUI := shouldUseTUI(settings)
-	logger, runLog, closeLog, logPath := newRunLogger(settings, newLogger(level, os.Stderr, useTUI))
-	defer closeLog()
-	logRunStart(runLog, settings.version, paths, opts)
+	logger, logPath := runLog.core, runLog.path
+	logRunStart(runLog.Logger, settings.version, paths, opts)
 	if opts.Api.Policy != nil {
-		opts.Api.Policy.SetLogger(runLog)
+		opts.Api.Policy.SetLogger(runLog.Logger)
 	}
 	model.logFile = logPath
 
@@ -588,7 +559,7 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	if opts.Api.Policy != nil {
 		opts.Api.Policy.OnPause(func(until time.Time) { p.Send(pauseMsg{until: until}) })
 	}
-	uploadManager = core.NewUploadManager(newLoggingReporter(teaReporter{p: p}, runLog), logger)
+	uploadManager = core.NewUploadManager(newLoggingReporter(teaReporter{p: p}, runLog.Logger), logger)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -611,9 +582,6 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 		}
 		runLog.Info("run finished", "succeeded", m.completed, "skipped", m.skipped, "failed", m.failed,
 			"canceled", m.canceled, "force_quit", m.forceQuit)
-		if logPath != "" {
-			fmt.Fprintf(os.Stderr, "Debug log: %s\n", logPath)
-		}
 		return finishUpload(m, os.Stdout, settings.reportFile)
 	}
 
