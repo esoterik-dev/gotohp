@@ -23,6 +23,7 @@ type fakeLibrary struct {
 	mu      sync.Mutex
 	known   map[string]string // hash -> media key
 	lookups int
+	batches int // batch requests (FindRemoteMediaByHashes)
 	uploads int
 	// uploadGate, when set, blocks every upload until it is closed or the
 	// upload's context is canceled.
@@ -49,6 +50,19 @@ func (f *fakeLibrary) FindRemoteMediaByHash(_ context.Context, hash []byte) (str
 	defer f.mu.Unlock()
 	f.lookups++
 	return f.known[string(hash)], nil
+}
+
+// FindRemoteMediaByHashes answers a batch, as the real endpoint does.
+func (f *fakeLibrary) FindRemoteMediaByHashes(_ context.Context, hashes [][]byte) (map[string]RemoteMediaMatch, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batches++
+	out := make(map[string]RemoteMediaMatch, len(hashes))
+	for _, h := range hashes {
+		f.lookups++
+		out[string(h)] = RemoteMediaMatch{PrimaryMediaKey: f.known[string(h)]}
+	}
+	return out, nil
 }
 
 func (f *fakeLibrary) UploadFileWithHashAndProgress(ctx context.Context, filePath string, _ []byte, _ int64, _ UploadProgressCallback) (ScottyFinalizeToken, error) {
@@ -590,5 +604,23 @@ func TestUploadReportsQueueLength(t *testing.T) {
 	}
 	if peak < 5 || rec.lengths[len(rec.lengths)-1] != 0 {
 		t.Fatalf("queue lengths %v", rec.lengths)
+	}
+}
+
+// Hash workers' duplicate checks reach the library in batches: with 8 hash
+// workers, far fewer requests than files.
+func TestUploadBatchesDuplicateChecks(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 64)
+	lib := newFakeLibrary()
+	for _, p := range paths {
+		lib.add(t, p)
+	}
+	_, rec := startRun(lib, paths, UploadOptions{HashThreads: 8, UploadThreads: 1})
+	rec.wait(t)
+	if _, skipped, failed := countResults(rec.results); skipped != 64 || failed != 0 {
+		t.Fatalf("skipped=%d failed=%d", skipped, failed)
+	}
+	if lib.batches == 0 || lib.batches > 64/2 || lib.lookups != 64 {
+		t.Fatalf("%d batch requests for %d lookups", lib.batches, lib.lookups)
 	}
 }

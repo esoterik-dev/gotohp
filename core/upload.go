@@ -266,7 +266,13 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	// Hash workers also check for duplicates and finish items already in the
 	// library, so only real uploads wait for a network worker. They finish
 	// before workChan closes, so before the network workers and results do.
-	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, state, checkApi, m.reporter, func(workerID int, p preparedUpload) {
+	// Hash workers' duplicate checks are batched into one request per round
+	// when the API supports it.
+	var finder remoteHashFinder = checkApi
+	if batcher, ok := checkApi.(batchHashFinder); ok && opts.HashThreads > 1 {
+		finder = newHashBatcher(prepareCtx, batcher, min(opts.HashThreads, hashBatchMax), hashBatchWait)
+	}
+	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, state, finder, m.reporter, func(workerID int, p preparedUpload) {
 		m.finishPrepared(workerID, checkApi, nil, p, results, opts, state)
 	})
 
