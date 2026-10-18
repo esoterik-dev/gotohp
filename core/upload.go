@@ -282,7 +282,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 			return clients[workerID], clientErrs[workerID]
 		}
 	}
-	// Hash workers' duplicate checks are batched into one request per round
+	// Hash workers' duplicate checks that arrive together share one request
 	// when the API supports it.
 	var finder remoteHashFinder = checkApi
 	if batcher, ok := checkApi.(batchHashFinder); ok && opts.HashThreads > 1 {

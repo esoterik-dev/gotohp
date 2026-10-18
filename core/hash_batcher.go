@@ -29,9 +29,11 @@ type hashLookupReply struct {
 }
 
 // hashBatcher answers single-hash lookups (it is a remoteHashFinder) by
-// collecting the lookups of concurrent hash workers into one request. With
-// N hash workers, about N times fewer requests reach the API, so a run
-// trips the rate limit far later.
+// sending lookups that arrive within a short window in one request, such as
+// the hash workers' first files or their checks after a 429 pause. Each
+// batch is sent at once, without waiting for earlier requests: a lookup
+// never queues behind another batch, so checks run at full speed. At most
+// one request per hash worker is in flight, since each has one lookup.
 type hashBatcher struct {
 	ctx  context.Context
 	api  batchHashFinder
@@ -88,7 +90,7 @@ func (b *hashBatcher) run() {
 			}
 		}
 		timer.Stop()
-		b.send(batch)
+		go b.send(batch)
 	}
 }
 
