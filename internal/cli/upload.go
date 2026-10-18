@@ -47,6 +47,7 @@ type preflightWarningMsg struct {
 	paths   []string
 	code    string
 	message string
+	skipped bool
 }
 
 type uploadCompleteMsg struct{}
@@ -145,6 +146,8 @@ type uploadWarning struct {
 	Paths   []string `json:"paths,omitempty"`
 	Code    string   `json:"code"`
 	Message string   `json:"message"`
+	// skipped warnings are also file results, so the summary leaves them out.
+	skipped bool
 }
 
 type albumSummary struct {
@@ -259,6 +262,7 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Paths:   msg.paths,
 			Code:    msg.code,
 			Message: msg.message,
+			skipped: msg.skipped,
 		})
 		return m, nil
 
@@ -461,6 +465,7 @@ func (r teaReporter) Warning(warning core.PreflightWarning) {
 		paths:   warning.Paths,
 		code:    warning.Code,
 		message: warning.Message,
+		skipped: warning.Skipped,
 	})
 }
 
@@ -643,7 +648,7 @@ func finishUpload(model uploadModel, output io.Writer, reportFile string) error 
 func buildUploadSummary(model uploadModel) uploadSummary {
 	warnings := make([]uploadWarning, 0, len(model.warnings))
 	for _, warning := range model.warnings {
-		if warning.Code == "incomplete-live-photo-skipped" || warning.Code == "ambiguous-filename-stem" {
+		if warning.skipped {
 			continue
 		}
 		warnings = append(warnings, warning)

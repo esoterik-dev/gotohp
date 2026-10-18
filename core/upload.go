@@ -357,7 +357,7 @@ func (m *UploadManager) finish() {
 func (m *UploadManager) reportPreflight(uploadItemCount int, warnings []PreflightWarning) {
 	skippedCount := 0
 	for _, warning := range warnings {
-		if isSkippedPreflightWarning(warning.Code) {
+		if warning.Skipped {
 			skippedCount++
 		}
 	}
@@ -370,7 +370,7 @@ func (m *UploadManager) reportPreflight(uploadItemCount int, warnings []Prefligh
 	})
 	for _, warning := range warnings {
 		m.reporter.Warning(warning)
-		if !isSkippedPreflightWarning(warning.Code) {
+		if !warning.Skipped {
 			continue
 		}
 		primaryPath := ""
@@ -386,10 +386,6 @@ func (m *UploadManager) reportPreflight(uploadItemCount int, warnings []Prefligh
 			Paths:       warning.Paths,
 		})
 	}
-}
-
-func isSkippedPreflightWarning(code string) bool {
-	return code == "incomplete-live-photo-skipped" || code == "ambiguous-filename-stem"
 }
 
 // handleAlbumCreation handles album creation based on config (manual name/key or AUTO mode)

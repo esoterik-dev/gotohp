@@ -86,9 +86,10 @@ func TestTeaReporterPreservesFileResultsAndWarnings(t *testing.T) {
 		r.Warning(core.PreflightWarning{
 			Paths: []string{"photos/orphan.mov"}, Code: "metadata-unreadable", Message: "Could not read the content identifier",
 		})
-		// These warnings duplicate skip results and are intentionally omitted from JSON.
+		// Skipped warnings duplicate skip results and are intentionally omitted
+		// from JSON; core marks them Skipped (see core.PreflightWarning).
 		for _, code := range []string{"incomplete-live-photo-skipped", "ambiguous-filename-stem"} {
-			r.Warning(core.PreflightWarning{Paths: []string{"photos/orphan.mov"}, Code: code, Message: "Skipped during preflight"})
+			r.Warning(core.PreflightWarning{Paths: []string{"photos/orphan.mov"}, Code: code, Message: "Skipped during preflight", Skipped: true})
 		}
 	})
 	if model.currentFiles[2] != "pair.heic" || model.workers[2] != "[2] uploading: pair.heic" {

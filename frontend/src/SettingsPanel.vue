@@ -282,8 +282,9 @@ watch(() => settings.value.uploadThreads, async (newValue) => {
             </button>
           </TooltipTrigger>
           <TooltipContent class="max-w-72">
-            Only upload Live Photos when both photo and video are available. If either is missing,
-            don't upload the remaining file separately.
+            Only upload Live Photos when both photo and video are available and can be paired. If
+            either is missing, its metadata can't be read, or several files share one Live Photo,
+            don't upload the files separately.
           </TooltipContent>
         </Tooltip>
       </div>
