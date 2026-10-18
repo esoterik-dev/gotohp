@@ -4,7 +4,7 @@ set -u
 
 usage() {
     cat <<'EOF'
-Usage: gotohp-iphone-upload [--dry-run] [--threads N] [--report-file PATH] [--state-file PATH] [--stage-local] PATH
+Usage: gotohp-iphone-upload [--dry-run] [--account EMAIL] [--threads N] [--report-file PATH] [--state-file PATH] [--stage-local] PATH
 
 Select Apple/iPhone camera images and Live Photo videos below PATH (usually a
 mounted iPhone's DCIM folder), then upload them with gotohp-cli, pairing each
@@ -32,6 +32,9 @@ recommended: without it every MOV is read in full to find Live Photo videos.
 
 Options:
   -n, --dry-run    Print the selected files without uploading
+  -a, --account EMAIL
+                    Google account to upload to (default: the active one,
+                    see gotohp-cli creds list); always printed before the run
   -t, --threads N  Upload worker count (default: 3)
       --report-file PATH
                     Save gotohp's final JSON report to PATH
@@ -51,6 +54,7 @@ die() {
 }
 
 threads=3
+account=''
 dry_run=0
 root_arg=''
 report_file=''
@@ -62,6 +66,11 @@ while (($# > 0)); do
         -n|--dry-run)
             dry_run=1
             shift
+            ;;
+        -a|--account)
+            (($# >= 2)) || die "--account requires a value"
+            account=$2
+            shift 2
             ;;
         -t|--threads)
             (($# >= 2)) || die "--threads requires a value"
@@ -125,6 +134,19 @@ if ! command -v ffprobe >/dev/null 2>&1; then
 fi
 upload_tool=$(command -v -- "${GOTOHP_CLI:-gotohp-cli}") ||
     die "${GOTOHP_CLI:-gotohp-cli} is not in PATH (set GOTOHP_CLI to the gotohp CLI)"
+
+# Name the account up front: a run must never land in another library just
+# because a different account happens to be active.
+if [[ -z "$account" ]]; then
+    account=$("$upload_tool" creds list 2>/dev/null | sed -n 's/^ *\* *\([^ ]*@[^ ]*\) *$/\1/p' | head -n 1)
+    [[ -n "$account" ]] || die "cannot tell which account is active; pass --account EMAIL (see: $upload_tool creds list)"
+    printf 'Account: %s (the active account; choose another with --account)\n' "$account"
+else
+    # Fail now, not file by file after scanning the whole phone.
+    "$upload_tool" creds list 2>/dev/null | grep -o '[^ ]*@[^ ]*' | grep -Fqx -- "$account" ||
+        die "no stored account $account (see: $upload_tool creds list)"
+    printf 'Account: %s\n' "$account"
+fi
 
 root=$(realpath -- "$root_arg") || die "cannot resolve PATH: $root_arg"
 [[ -e "$root" ]] || die "PATH does not exist: $root"
@@ -290,6 +312,7 @@ selection_file="${report_file%.json}.selection.tsv"
     for file in "${unreadable_images[@]}" "${unreadable_videos[@]}"; do unreadable["$file"]=1; done
     printf '# gotohp-iphone-upload selection, %s\n' "$(date --iso-8601=seconds)"
     printf '# root: %s\n' "$root"
+    printf '# account: %s\n' "$account"
     printf '# mov-check: %s\n' "$mov_check"
     [[ -z "$slow_mov_warning" ]] || printf '# warning: %s\n' "$slow_mov_warning"
     print_summary | sed 's/^/# /'
@@ -315,9 +338,10 @@ fi
 mkdir -p -- "$(dirname -- "$state_file")" || die "could not create state directory for: $state_file"
 printf 'State file: %s\n' "$state_file"
 
-printf 'Starting gotohp upload with %d thread(s)...\n' "$threads"
+printf 'Starting gotohp upload to %s with %d thread(s)...\n' "$account" "$threads"
 upload_args=(
     upload
+    --account "$account"
     --pair-live-photos
     --threads "$threads"
     --report-file "$report_file"
