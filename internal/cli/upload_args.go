@@ -54,6 +54,8 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("revalidate-state", false, "ignore cached confirmations and recheck remote state")
 	f.String("report-file", "", "write the final JSON summary to PATH")
 	f.String("retry-report", "", "retry only failed, non-skipped files from a JSON report; no positional paths")
+	f.String("source-root", "", "with --retry-report: find the report's files by name under this directory instead of their recorded paths")
+	f.StringArray("folder", nil, "with --retry-report and --source-root: retry only files in this folder directly below the root; may be repeated")
 
 	// Accepted for compatibility; skipping incomplete pairs is already the default.
 	f.Bool("skip-incomplete-live-photos", false, "")
@@ -72,11 +74,23 @@ type uploadRunSettings struct {
 }
 
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
-	if report, _ := cmd.Flags().GetString("retry-report"); report != "" {
+	sourceRoot, _ := cmd.Flags().GetString("source-root")
+	folders, _ := cmd.Flags().GetStringArray("folder")
+	report, _ := cmd.Flags().GetString("retry-report")
+	if report == "" && (sourceRoot != "" || len(folders) > 0) {
+		return fmt.Errorf("--source-root and --folder only apply to --retry-report")
+	}
+	if len(folders) > 0 && sourceRoot == "" {
+		return fmt.Errorf("--folder requires --source-root")
+	}
+	if report != "" {
 		var err error
 		pair, _ := cmd.Flags().GetBool("pair-live-photos")
 		paths, err = retryReportPaths(report, pair, cmd.ErrOrStderr())
 		if err != nil {
+			return err
+		}
+		if paths, err = relocateRetryPaths(paths, sourceRoot, folders, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 		paths = existingRetryPaths(paths, cmd.ErrOrStderr())

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -101,6 +102,67 @@ func retryReportPaths(path string, pairLivePhotos bool, warn io.Writer) ([]strin
 		return nil, fmt.Errorf("report contains only album failures; file retries cannot repair album work")
 	}
 	return paths, nil
+}
+
+// relocateRetryPaths finds each retry path under sourceRoot (--source-root)
+// by name, the way verify-live-photos --source-root does, for reports whose
+// recorded paths are gone, such as a temporary folder or an old mount point.
+// With folders (--folder) it keeps only files in one of those folders
+// directly below sourceRoot. Paths it cannot find are skipped with a warning.
+// It fails when no found file is in the requested folders, so a misspelt
+// folder is not mistaken for nothing left to retry.
+func relocateRetryPaths(paths []string, sourceRoot string, folders []string, warn io.Writer) ([]string, error) {
+	if sourceRoot == "" {
+		return paths, nil
+	}
+	if info, err := os.Stat(sourceRoot); err != nil {
+		return nil, fmt.Errorf("--source-root: %w", err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("--source-root %q is not a directory", sourceRoot)
+	}
+	index, err := indexSourceRoot(sourceRoot)
+	if err != nil {
+		return nil, err
+	}
+	resolver := reportPathResolver{index: index}
+	kept := []string{}
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		found, err := resolver.resolve(path)
+		if err != nil {
+			fmt.Fprintf(warn, "Warning: not retrying %q: %v\n", path, err)
+			continue
+		}
+		if len(folders) > 0 && !inRetryFolder(sourceRoot, found, folders) {
+			continue
+		}
+		if !seen[found] {
+			kept = append(kept, found)
+			seen[found] = true
+		}
+	}
+	if len(folders) > 0 && len(kept) == 0 {
+		return nil, fmt.Errorf("no failed files were found in --folder %s under %s", strings.Join(folders, ", "), sourceRoot)
+	}
+	return kept, nil
+}
+
+// inRetryFolder reports whether path is in one of folders directly below root.
+func inRetryFolder(root, path string, folders []string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	top, _, nested := strings.Cut(filepath.ToSlash(rel), "/")
+	if !nested {
+		return false // directly in the root, not in a folder
+	}
+	for _, folder := range folders {
+		if strings.EqualFold(top, folder) {
+			return true
+		}
+	}
+	return false
 }
 
 // existingRetryPaths drops retry paths that no longer exist, warning about
