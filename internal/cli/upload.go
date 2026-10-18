@@ -51,6 +51,19 @@ type preflightWarningMsg struct {
 
 type uploadCompleteMsg struct{}
 
+// pauseMsg reports that an HTTP 429 paused every request until until.
+type pauseMsg struct{ until time.Time }
+
+// pauseTickMsg redraws the pause countdown.
+type pauseTickMsg struct{}
+
+// queueMsg reports how many hashed files wait for an upload worker.
+type queueMsg struct{ n int }
+
+func pauseTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return pauseTickMsg{} })
+}
+
 // cancelMsg asks the run to stop. The first one starts no new files and lets
 // in-flight files finish, so the report stays complete; a second one aborts
 // in-flight files and quits immediately with what has finished.
@@ -103,6 +116,9 @@ type uploadModel struct {
 	cancel       func()       // abort in-flight files
 	workingDir   string
 	logFile      string
+	pausedUntil  time.Time // all requests paused by a 429 until then
+	pauseTicking bool
+	queued       int // hashed files waiting for an upload worker
 	// Album state
 	albumName       string
 	albumItemsAdded int
@@ -172,6 +188,27 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.progress.Width = msg.Width - 4
+		return m, nil
+
+	case pauseMsg:
+		if msg.until.After(m.pausedUntil) {
+			m.pausedUntil = msg.until
+		}
+		if m.pauseTicking {
+			return m, nil
+		}
+		m.pauseTicking = true
+		return m, pauseTick()
+
+	case pauseTickMsg:
+		if time.Now().Before(m.pausedUntil) {
+			return m, pauseTick()
+		}
+		m.pauseTicking = false
+		return m, nil
+
+	case queueMsg:
+		m.queued = msg.n
 		return m, nil
 
 	case uploadStartMsg:
@@ -307,7 +344,18 @@ func (m uploadModel) View() string {
 		percent := float64(m.completed+m.failed+m.skipped) / float64(m.totalFiles)
 		b.WriteString(m.progress.ViewAs(percent))
 		fmt.Fprintf(&b, "\n%d/%d items", m.completed+m.failed+m.skipped, m.totalFiles)
-		fmt.Fprintf(&b, " (? %d success, ? %d skipped, ? %d failed)\n\n", m.completed, m.skipped, m.failed)
+		fmt.Fprintf(&b, " (? %d success, ? %d skipped, ? %d failed)\n", m.completed, m.skipped, m.failed)
+		if m.queued > 0 {
+			fmt.Fprintf(&b, "%d hashed file(s) waiting for an upload worker\n", m.queued)
+		}
+		b.WriteString("\n")
+	}
+
+	if wait := time.Until(m.pausedUntil); wait > 0 {
+		pauseStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+		b.WriteString(pauseStyle.Render(fmt.Sprintf(
+			"Paused: Google rate limit (HTTP 429). All requests resume in %ds; nothing is stuck.", int(wait.Seconds()+0.999))))
+		b.WriteString("\n\n")
 	}
 
 	// Worker status
@@ -425,6 +473,8 @@ func (r teaReporter) FileResult(result core.FileUploadResult) {
 	})
 }
 
+func (r teaReporter) QueueLength(n int) { r.p.Send(queueMsg{n: n}) }
+
 func (r teaReporter) AlbumProgress(status core.AlbumStatus) {
 	r.p.Send(albumProgressMsg{
 		albumName:  status.AlbumName,
@@ -515,6 +565,9 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 		uploadManager.Cancel()
 	}
 	p := tea.NewProgram(model, programOptions...)
+	if opts.Api.Policy != nil {
+		opts.Api.Policy.OnPause(func(until time.Time) { p.Send(pauseMsg{until: until}) })
+	}
 	uploadManager = core.NewUploadManager(newLoggingReporter(teaReporter{p: p}, logger), logger)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)

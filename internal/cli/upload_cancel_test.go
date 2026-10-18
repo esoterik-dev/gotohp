@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -78,5 +79,28 @@ func TestSecondCancelForceQuitsWithFinishedResults(t *testing.T) {
 	}
 	if !summary.Canceled || len(summary.Results) != 1 {
 		t.Fatalf("finished results lost on force quit: %+v", summary)
+	}
+}
+
+// A 429 pause is shown with a countdown, the queue length is shown, and the
+// countdown stops redrawing once the pause is over.
+func TestViewShowsPauseAndQueue(t *testing.T) {
+	m := initialModel()
+	updated, _ := m.Update(uploadStartMsg{total: 10})
+	m = updated.(uploadModel)
+	updated, cmd := m.Update(pauseMsg{until: time.Now().Add(42 * time.Second)})
+	m = updated.(uploadModel)
+	if cmd == nil {
+		t.Fatal("no countdown tick started")
+	}
+	updated, _ = m.Update(queueMsg{n: 7})
+	m = updated.(uploadModel)
+	view := m.View()
+	if !strings.Contains(view, "Paused: Google rate limit") || !strings.Contains(view, "7 hashed file(s) waiting") {
+		t.Fatalf("view:\n%s", view)
+	}
+	m.pausedUntil = time.Now().Add(-time.Second)
+	if updated, cmd = m.Update(pauseTickMsg{}); cmd != nil || strings.Contains(updated.(uploadModel).View(), "Paused") {
+		t.Fatal("countdown kept running after the pause")
 	}
 }

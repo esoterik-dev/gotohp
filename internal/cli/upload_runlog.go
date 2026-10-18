@@ -124,6 +124,13 @@ func (r *loggingReporter) FileResult(res core.FileUploadResult) {
 	r.inner.FileResult(res)
 }
 
+// QueueLength forwards to inner when it wants queue lengths.
+func (r *loggingReporter) QueueLength(n int) {
+	if qr, ok := r.inner.(core.QueueReporter); ok {
+		qr.QueueLength(n)
+	}
+}
+
 func (r *loggingReporter) AlbumProgress(s core.AlbumStatus) { r.inner.AlbumProgress(s) }
 
 func (r *loggingReporter) AlbumComplete(s core.AlbumStatus) {

@@ -18,6 +18,13 @@ type UploadReporter interface {
 	AlbumError(AlbumError)
 }
 
+// QueueReporter is optionally implemented by an UploadReporter that wants
+// the number of hashed files waiting for an upload worker. It is reported
+// whenever that number changes; reporters without it are unaffected.
+type QueueReporter interface {
+	QueueLength(n int)
+}
+
 // NopReporter discards every event.
 type NopReporter struct{}
 

@@ -228,18 +228,28 @@ func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWor
 	}
 	go func() { wg.Wait(); close(queued) }()
 	if !bounded {
-		go unboundedQueue(queued, ready)
+		var report func(int)
+		if qr, ok := reporter.(QueueReporter); ok {
+			report = qr.QueueLength
+		}
+		go unboundedQueue(queued, ready, report)
 	}
 	return ready
 }
 
 // unboundedQueue forwards everything from in to out in order, buffering as
 // much as needed, so senders on in never wait for receivers on out. out is
-// closed after in is closed and drained.
-func unboundedQueue(in <-chan preparedUpload, out chan<- preparedUpload) {
+// closed after in is closed and drained. report, if set, gets the number of
+// buffered items whenever it changes.
+func unboundedQueue(in <-chan preparedUpload, out chan<- preparedUpload, report func(int)) {
 	defer close(out)
 	var pending []preparedUpload
+	reported := 0
 	for in != nil || len(pending) > 0 {
+		if report != nil && len(pending) != reported {
+			reported = len(pending)
+			report(reported)
+		}
 		var send chan<- preparedUpload
 		var next preparedUpload
 		if len(pending) > 0 {
@@ -256,5 +266,8 @@ func unboundedQueue(in <-chan preparedUpload, out chan<- preparedUpload) {
 			pending[0] = preparedUpload{}
 			pending = pending[1:]
 		}
+	}
+	if report != nil && reported != 0 {
+		report(0)
 	}
 }
