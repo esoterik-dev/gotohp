@@ -34,15 +34,20 @@ ls ~/mnt/iPhone/DCIM
 # 2. Preview: counts and the selected files, nothing is uploaded
 scripts/gotohp-iphone-upload.sh --dry-run ~/mnt/iPhone/DCIM
 
-# 3. Upload (one thread and local staging suit a phone mount)
-scripts/gotohp-iphone-upload.sh --threads 1 --stage-local ~/mnt/iPhone/DCIM
+# 3. Upload (one thread and local staging suit a phone mount). Name the
+#    account, so the run never depends on which one happens to be active.
+gotohp-cli creds list
+scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-local ~/mnt/iPhone/DCIM
 
 # 4. Retry: run the same command again. Files already confirmed are skipped
 #    without being read; failures and files a canceled run never started are retried.
-scripts/gotohp-iphone-upload.sh --threads 1 --stage-local ~/mnt/iPhone/DCIM
+scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-local ~/mnt/iPhone/DCIM
 
 # One folder only
-scripts/gotohp-iphone-upload.sh --threads 1 --stage-local ~/mnt/iPhone/DCIM/101APPLE
+scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-local ~/mnt/iPhone/DCIM/101APPLE
+
+# 5. Check the Live Photos of a run (read-only: hash lookups, no downloads)
+gotohp-cli verify-live-photos --account you@gmail.com REPORT.json --report-file REPORT.verify.json
 ```
 
 ## Options
@@ -50,6 +55,7 @@ scripts/gotohp-iphone-upload.sh --threads 1 --stage-local ~/mnt/iPhone/DCIM/101A
 | Option | Meaning |
 | --- | --- |
 | `-n`, `--dry-run` | Print the counts and the selected files; upload nothing. |
+| `-a`, `--account EMAIL` | Google account to upload to (default: the active one, `gotohp-cli creds list`). Printed before the run and recorded in the selection file; an account that is not stored stops the script at once. |
 | `-t`, `--threads N` | gotohp workers (default 3). Use 1 on a phone mount. |
 | `--report-file PATH` | gotohp's JSON report (default: `gotohp-iphone-<time>-<pid>.json` in the current directory). |
 | `--state-file PATH` | Confirmed uploads, reused by later runs (default: `~/.local/state/gotohp/iphone-upload-state.json`). |

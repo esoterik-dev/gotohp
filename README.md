@@ -52,7 +52,7 @@ gotohp-cli verify-live-photos live.json --report-file live-verification.json
 
 # 7. iPhone camera roll on Linux (camera photos and Live Photos only)
 scripts/gotohp-iphone-upload.sh --dry-run ~/mnt/iPhone/DCIM
-scripts/gotohp-iphone-upload.sh --threads 1 --stage-local ~/mnt/iPhone/DCIM
+scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-local ~/mnt/iPhone/DCIM
 
 # 8. Something went wrong? Every run writes a debug log in the current directory
 jq -c 'select(.level == "WARN" or .level == "ERROR")' gotohp-upload-*.log
