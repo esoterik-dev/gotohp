@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -519,6 +520,8 @@ func newRunLogger(settings uploadRunSettings, stderr *slog.Logger) (*slog.Logger
 			fmt.Fprintf(os.Stderr, "Warning: no debug log for this run: %v\n", err)
 			return stderr, func() {}, ""
 		}
+		// Make room for this run's log among the newest keepRunLogs.
+		pruneRunLogs(filepath.Dir(path), keepRunLogs-1)
 	}
 	file, handler, err := openRunLog(path)
 	if err != nil {

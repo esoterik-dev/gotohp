@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,6 +34,23 @@ func defaultRunLogPath(now time.Time) (string, error) {
 	}
 	name := fmt.Sprintf("upload-%s-%d.log", now.Format("20060102-150405"), os.Getpid())
 	return filepath.Join(dir, "gotohp", "logs", name), nil
+}
+
+// keepRunLogs is how many debug logs the default log directory keeps.
+const keepRunLogs = 30
+
+// pruneRunLogs deletes all but the newest keep upload-*.log files in dir.
+// Names start with the run's start time, so name order is age order. Only
+// the default directory is pruned, never a --log-file path.
+func pruneRunLogs(dir string, keep int) {
+	logs, err := filepath.Glob(filepath.Join(dir, "upload-*.log"))
+	if err != nil || len(logs) <= keep {
+		return
+	}
+	sort.Strings(logs)
+	for _, old := range logs[:len(logs)-keep] {
+		_ = os.Remove(old)
+	}
 }
 
 // openRunLog creates the run's debug log: JSON lines at debug level.

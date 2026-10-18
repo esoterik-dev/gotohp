@@ -3,10 +3,12 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +129,29 @@ func TestLoggingReporterLogsStageChangesOnly(t *testing.T) {
 	lines := readLog(t, path)
 	if inner.statuses != 3 || len(lines) != 3 || !hasMsg(lines, "file uploaded") {
 		t.Fatalf("ui=%d log=%v", inner.statuses, lines)
+	}
+}
+
+// The default log directory keeps only the newest logs; other files in it
+// are left alone.
+func TestPruneRunLogsKeepsNewest(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 5 {
+		name := filepath.Join(dir, fmt.Sprintf("upload-20261018-0%d0000-1.log", i))
+		if err := os.WriteFile(name, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(other, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pruneRunLogs(dir, 2)
+	left, _ := filepath.Glob(filepath.Join(dir, "*"))
+	want := []string{other, filepath.Join(dir, "upload-20261018-030000-1.log"), filepath.Join(dir, "upload-20261018-040000-1.log")}
+	sort.Strings(left)
+	sort.Strings(want)
+	if fmt.Sprint(left) != fmt.Sprint(want) {
+		t.Fatalf("left %v", left)
 	}
 }
