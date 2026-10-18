@@ -802,8 +802,7 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	// An item already found in the library, or confirmed by the state file,
 	// needs no request, so a cancel does not turn its known result into a
 	// failure.
-	known := failure == nil && (prepared.cachedKey != "" ||
-		item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != "")
+	known := failure == nil && (prepared.cachedKey != "" || prepared.knownResult(opts))
 	select {
 	case <-cancel:
 		if !known {

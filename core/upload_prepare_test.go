@@ -225,3 +225,84 @@ func TestForceUploadSkipsDuplicateCheck(t *testing.T) {
 		t.Fatalf("calls=%d", finder.calls)
 	}
 }
+
+// Live Photo pairs are checked on hash workers: a pair whose still is in the
+// library is finished there (skipped, no upload worker), a new pair is
+// queued with both keys known, and with --update-existing-photos-to-live a
+// pair with a known still is queued for reconciling.
+func TestHashWorkersCheckLivePhotoPairs(t *testing.T) {
+	dir := t.TempDir()
+	pairs := make([]LivePhotoPair, 2)
+	for i := range pairs {
+		pairs[i] = LivePhotoPair{
+			PhotoPath: filepath.Join(dir, fmt.Sprintf("IMG_%d.HEIC", i)),
+			VideoPath: filepath.Join(dir, fmt.Sprintf("IMG_%d.MOV", i)),
+		}
+		for _, p := range []string{pairs[i].PhotoPath, pairs[i].VideoPath} {
+			if err := os.WriteFile(p, []byte(p), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	finder := &hashFinder{known: make(map[string]string)}
+	still, err := CalculateSHA1(context.Background(), pairs[0].PhotoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finder.known[string(still)] = "existing-still"
+	items := []UploadWorkItem{
+		{Kind: UploadWorkLivePhoto, LivePhoto: &pairs[0]},
+		{Kind: UploadWorkLivePhoto, LivePhoto: &pairs[1]},
+	}
+	instantRechecks(t)
+	for _, update := range []bool{false, true} {
+		var mu sync.Mutex
+		finished := 0
+		finish := func(_ int, p preparedUpload) {
+			mu.Lock()
+			defer mu.Unlock()
+			finished++
+			if p.item.LivePhoto != &pairs[0] || p.files[0].remoteKey != "existing-still" {
+				t.Errorf("finished %+v", p.item)
+			}
+		}
+		opts := UploadOptions{HashThreads: 2, UploadThreads: 1, UpdateExistingPhotosToLive: update}
+		var queued []preparedUpload
+		for p := range prepareUploads(context.Background(), nil, items, opts, nil, finder, NopReporter{}, finish) {
+			queued = append(queued, p)
+			if !p.files[0].checked || !p.files[1].checked {
+				t.Fatalf("queued pair not checked: %+v", p.files)
+			}
+		}
+		if wantFinished := map[bool]int{false: 1, true: 0}[update]; finished != wantFinished || len(queued) != 2-wantFinished {
+			t.Fatalf("update=%v: finished=%d queued=%d", update, finished, len(queued))
+		}
+	}
+}
+
+// A pair finished on a hash worker is reported as skipped without a single
+// further request: lookupAPI has no upload or commit methods.
+func TestCheckedLivePhotoSkipNeedsNoRequests(t *testing.T) {
+	dir := t.TempDir()
+	pair := LivePhotoPair{PhotoPath: filepath.Join(dir, "IMG.HEIC"), VideoPath: filepath.Join(dir, "IMG.MOV")}
+	for _, p := range []string{pair.PhotoPath, pair.VideoPath} {
+		if err := os.WriteFile(p, []byte(p), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prepared := prepareUpload(context.Background(), UploadWorkItem{Kind: UploadWorkLivePhoto, LivePhoto: &pair}, UploadOptions{}, 0, NopReporter{})
+	if prepared.err != nil {
+		t.Fatal(prepared.err)
+	}
+	photo, video := prepared.files[0], prepared.files[1]
+	photo.checked, photo.remoteKey = true, "still"
+	video.checked = true
+	api := lookupAPI{lookup: func([]byte) (string, error) {
+		t.Fatal("looked up again")
+		return "", nil
+	}}
+	_, skipped, err := uploadLivePhotoWithCallback(context.Background(), api, pair, photo, video, LivePhotoUploadOptions{}, 0, NopReporter{})
+	if err != nil || !skipped {
+		t.Fatalf("skipped=%v err=%v", skipped, err)
+	}
+}
