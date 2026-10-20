@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -169,5 +170,24 @@ func TestBackoffLargeAndZero(t *testing.T) {
 	}
 	if got := CalculateBackoff(1, RetryConfig{}); got != 0 {
 		t.Fatal(got)
+	}
+}
+
+// The run log must show each request and every 429 pause, so a run that
+// seems stuck can be explained afterwards.
+func TestPolicyLogsRequestsAndRateLimitPauses(t *testing.T) {
+	var out strings.Builder
+	policy := mustPolicy(t, 0, true, 0)
+	policy.SetLogger(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return statusResponse(429, http.Header{"Retry-After": []string{"30"}}), nil
+		})}}
+	_, _ = api.FindRemoteMediaByHash(context.Background(), make([]byte, 20))
+	log := out.String()
+	for _, want := range []string{"msg=request", "status=429", "rate limited (HTTP 429)", "retry_after=30"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q:\n%s", want, log)
+		}
 	}
 }

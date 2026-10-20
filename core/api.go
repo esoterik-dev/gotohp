@@ -664,9 +664,11 @@ func (a *Api) commitSerialized(ctx context.Context, serializedData []byte, lande
 			}
 			if landed != nil {
 				if key := landed(ctx); key != "" {
+					a.policy.log().Info("commit failed but the item is in the library; using it", "media_key", key, "error", lastErr.Error())
 					return key, nil
 				}
 			}
+			a.policy.log().Info("retrying commit", "attempt", attempt+1, "of", retryConfig.MaxRetries+1, "error", lastErr.Error())
 		}
 		mediaKey, retryable, err := a.doCommitRequest(ctx, serializedData)
 		attempts++
@@ -680,6 +682,7 @@ func (a *Api) commitSerialized(ctx context.Context, serializedData []byte, lande
 	}
 	if landed != nil && ctx.Err() == nil {
 		if key := landed(ctx); key != "" {
+			a.policy.log().Info("commit failed but the item is in the library; using it", "media_key", key, "error", lastErr.Error())
 			return key, nil
 		}
 	}
