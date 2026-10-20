@@ -102,6 +102,9 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	if err := validateUploadOptions(f, opts); err != nil {
 		return err
 	}
+	if err := validateLogFile(f, paths); err != nil {
+		return err
+	}
 	policy, err := requestPolicyFromFlags(f)
 	if err != nil {
 		return err
