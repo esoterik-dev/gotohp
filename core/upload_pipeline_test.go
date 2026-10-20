@@ -97,6 +97,7 @@ type runRecorder struct {
 	mu       sync.Mutex
 	results  []FileUploadResult
 	statuses []ThreadStatus
+	warnings []PreflightWarning
 	resultCh chan FileUploadResult
 	done     chan struct{}
 }
@@ -106,6 +107,12 @@ func newRunRecorder() *runRecorder {
 }
 
 func (r *runRecorder) UploadStop() { close(r.done) }
+
+func (r *runRecorder) Warning(w PreflightWarning) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.warnings = append(r.warnings, w)
+}
 
 func (r *runRecorder) ThreadStatus(s ThreadStatus) {
 	r.mu.Lock()
@@ -607,5 +614,51 @@ func TestUploadStateOpenFailureIsOneError(t *testing.T) {
 	rec.wait(t)
 	if len(rec.results) != 1 || !rec.results[0].IsError || rec.results[0].Path != "" {
 		t.Fatalf("results=%+v", rec.results)
+	}
+}
+
+// README: with --stage-local the staged copy is uploaded even if its source
+// changed. --update-state cannot checkpoint that source, but the item is still
+// in the library: it is reported as uploaded with a warning, and not deleted.
+func TestUploadedItemWithFailedCheckpointIsNotAFailure(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 2)
+	lib := newFakeLibrary()
+	lib.uploadGate = make(chan struct{})
+	lib.uploadStarted = make(chan string, len(paths))
+	_, rec := startRun(lib, paths, UploadOptions{
+		Api:         ApiOptions{Account: "user@example.com"},
+		HashThreads: 2, UploadThreads: 1, StageLocal: true, DeleteFromHost: true,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true,
+	})
+	select {
+	case <-lib.uploadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upload started")
+	}
+	time.Sleep(200 * time.Millisecond) // both files staged and hashed
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte("changed after staging"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(lib.uploadGate)
+	rec.wait(t)
+	for _, res := range rec.results {
+		if res.IsError || res.MediaKey == "" {
+			t.Fatalf("uploaded item reported as %+v", res)
+		}
+	}
+	if len(rec.warnings) != len(paths) {
+		t.Fatalf("warnings=%+v", rec.warnings)
+	}
+	for _, w := range rec.warnings {
+		if w.Code != "state-checkpoint-failed" {
+			t.Fatalf("warning %+v", w)
+		}
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("source without a checkpoint was deleted: %v", err)
+		}
 	}
 }

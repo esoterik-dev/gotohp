@@ -847,17 +847,22 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	mediaKey, skipped, err := uploadPreparedItem(ctx, api, prepared, opts, state, workerID, m.reporter)
 	skipCode, skipReason := remoteSkip(isLivePhoto)
 	if err != nil && mediaKey != "" {
-		// The item is in the library; only deleting the local copy failed.
+		// The item is in the library; only deleting the local copy, or saving
+		// its checkpoint, failed.
+		code, problem := "local-cleanup-failed", "local cleanup failed"
+		if errors.Is(err, errStateCheckpoint) {
+			code, problem = "state-checkpoint-failed", "state checkpoint failed"
+		}
 		result := FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
-		message := fmt.Sprintf("Uploaded, but local cleanup failed: %v", err)
+		message := fmt.Sprintf("Uploaded, but %s: %v", problem, err)
 		if skipped {
 			result.Skipped, result.SkipCode, result.SkipReason = true, skipCode, skipReason
-			message = fmt.Sprintf("Already in library, but local cleanup failed: %v", err)
+			message = fmt.Sprintf("Already in library, but %s: %v", problem, err)
 		}
 		results <- result
 		m.reporter.Warning(PreflightWarning{
 			Paths:   paths,
-			Code:    "local-cleanup-failed",
+			Code:    code,
 			Message: err.Error(),
 		})
 		m.reporter.ThreadStatus(ThreadStatus{
@@ -900,6 +905,10 @@ func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error
 	prepared.cleanup()
 }
 
+// errStateCheckpoint marks an item that is in the library but whose state
+// checkpoint could not be saved.
+var errStateCheckpoint = errors.New("state checkpoint failed")
+
 // uploadPreparedItem uploads one item and, with a writable state, checkpoints
 // it. --delete then waits until the checkpoint is durable. Without a writable
 // state, deletion happens inside the upload exactly as before.
@@ -913,8 +922,9 @@ func uploadPreparedItem(ctx context.Context, api uploadAPI, prepared preparedUpl
 		return mediaKey, skipped, err
 	}
 	if err := state.save(prepared, mediaKey, skipped); err != nil {
-		// Report the item as failed: it must not be deleted without a checkpoint.
-		return "", false, fmt.Errorf("upload confirmed but state checkpoint failed: %w", err)
+		// The item is in the library, so it is not a failure, but its sources
+		// must not be deleted without a checkpoint.
+		return mediaKey, skipped, fmt.Errorf("%w: %w", errStateCheckpoint, err)
 	}
 	if deleteAfterCheckpoint && mediaKey != "" && (!skipped || prepared.item.Kind == UploadWorkSingle) {
 		return mediaKey, skipped, removePreparedSources(prepared)
