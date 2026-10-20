@@ -89,3 +89,44 @@ func TestReportAtomicReplacement(t *testing.T) {
 		t.Fatalf("permissions=%v", info.Mode())
 	}
 }
+
+func TestReportFileDirectoryRejectedBeforeUpload(t *testing.T) {
+	previousConfig, previousPath := core.AppConfig, core.ConfigPath
+	previousStdout := os.Stdout
+	t.Cleanup(func() {
+		core.AppConfig, core.ConfigPath = previousConfig, previousPath
+		os.Stdout = previousStdout
+	})
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "gotohp.config")
+	if err := os.WriteFile(configPath, []byte("account: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	photo := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(photo, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportDir := filepath.Join(dir, "reports")
+	if err := os.Mkdir(reportDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := os.CreateTemp(dir, "stdout-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = output.Close() }()
+	os.Stdout = output
+	// The empty credential store makes an upload fail before any network
+	// request, so a run that gets that far still prints a summary.
+	code := Run([]string{"upload", photo, "--config", configPath, "--no-tui", "--report-file", reportDir}, Info{ExecutableName: "gotohp-cli"})
+	os.Stdout = previousStdout
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if info, err := output.Stat(); err != nil || info.Size() != 0 {
+		t.Fatalf("upload ran before rejecting the report path (stdout size %v, err %v)", info.Size(), err)
+	}
+	if info, err := os.Stat(reportDir); err != nil || !info.IsDir() {
+		t.Fatalf("report directory was replaced: %v", err)
+	}
+}

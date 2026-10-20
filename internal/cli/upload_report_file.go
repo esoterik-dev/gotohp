@@ -14,7 +14,8 @@ import (
 var reportInputFlags = []string{"config"}
 
 // validateReportFile rejects a --report-file that would overwrite an input
-// file, and checks that its directory is writable before any upload starts.
+// file or names a directory, and checks that its directory is writable before
+// any upload starts.
 func validateReportFile(f *pflag.FlagSet) error {
 	output, _ := f.GetString("report-file")
 	if output == "" {
@@ -29,6 +30,9 @@ func validateReportFile(f *pflag.FlagSet) error {
 	// The config in use may come from a default location rather than --config.
 	if core.ConfigPath != "" && samePath(output, core.ConfigPath) {
 		return fmt.Errorf("--report-file must not overwrite the config file %s", core.ConfigPath)
+	}
+	if info, err := os.Stat(output); err == nil && info.IsDir() {
+		return fmt.Errorf("--report-file %s is a directory; name a file", output)
 	}
 	probe, err := os.CreateTemp(filepath.Dir(output), ".gotohp-report-*")
 	if err != nil {
