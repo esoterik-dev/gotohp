@@ -282,7 +282,13 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 			return clients[workerID], clientErrs[workerID]
 		}
 	}
-	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, state, checkApi, m.reporter, func(workerID int, p preparedUpload) {
+	// Hash workers' duplicate checks that arrive together share one request
+	// when the API supports it.
+	var finder remoteHashFinder = checkApi
+	if batcher, ok := checkApi.(batchHashFinder); ok && opts.HashThreads > 1 {
+		finder = newHashBatcher(prepareCtx, batcher, min(opts.HashThreads, hashBatchMax), hashBatchWait)
+	}
+	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, state, finder, m.reporter, func(workerID int, p preparedUpload) {
 		api, apiErr := finishAPI(workerID)
 		m.finishPrepared(workerID, api, apiErr, p, results, opts, state)
 	})

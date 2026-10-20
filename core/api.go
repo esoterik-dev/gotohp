@@ -357,9 +357,6 @@ func (a *Api) FindRemoteMediaMatchesByHash(ctx context.Context, shaHash []byte) 
 }
 
 func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (RemoteMediaMatch, error) {
-	// Create the protobuf message
-
-	// Create and initialize the protobuf message with all required nested structures
 	protoBody := generated.HashCheck{
 		Field1: &generated.HashCheckField1Type{
 			Field1: &generated.HashCheckField1TypeField1Type{
@@ -368,20 +365,31 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (RemoteMe
 			Field2: &generated.HashCheckField1TypeField2Type{},
 		},
 	}
-
-	// Serialize the protobuf message
 	serializedData, err := proto.Marshal(&protoBody)
 	if err != nil {
 		return RemoteMediaMatch{}, fmt.Errorf("failed to marshal protobuf: %w", err)
 	}
+	bodyBytes, err := a.postHashCheck(ctx, serializedData)
+	if err != nil {
+		return RemoteMediaMatch{}, err
+	}
+	var pbResp generated.RemoteMatches
+	if err := proto.Unmarshal(bodyBytes, &pbResp); err != nil {
+		return RemoteMediaMatch{}, fmt.Errorf("failed to unmarshal protobuf: %w", err)
+	}
+	return RemoteMediaMatch{
+		PrimaryMediaKey: pbResp.GetMediaKey(),
+		RelatedMediaKey: pbResp.GetField1().GetField2().GetField2().GetField6().GetMediaKey(),
+	}, nil
+}
 
-	// Get the bearer token
+// postHashCheck sends a serialized HashCheck request and returns the body
+// of a successful response.
+func (a *Api) postHashCheck(ctx context.Context, serializedData []byte) ([]byte, error) {
 	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
-		return RemoteMediaMatch{}, fmt.Errorf("failed to get bearer token: %w", err)
+		return nil, fmt.Errorf("failed to get bearer token: %w", err)
 	}
-
-	// Prepare headers
 	headers := map[string]string{
 		"Accept-Encoding": "gzip",
 		"Accept-Language": a.language,
@@ -389,8 +397,6 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (RemoteMe
 		"User-Agent":      a.userAgent,
 		"Authorization":   "Bearer " + bearerToken,
 	}
-
-	// Create the request
 	req, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
@@ -398,42 +404,25 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (RemoteMe
 		bytes.NewReader(serializedData),
 	)
 	if err != nil {
-		return RemoteMediaMatch{}, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Set headers
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-
-	// Make the request
 	resp, err := a.do(req)
 	if err != nil {
-		return RemoteMediaMatch{}, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return RemoteMediaMatch{}, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return nil, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
-
-	// Parse the response body
 	bodyBytes, err := ReadResponseBody(resp)
 	if err != nil {
-		return RemoteMediaMatch{}, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-
-	var pbResp generated.RemoteMatches
-	if err := proto.Unmarshal(bodyBytes, &pbResp); err != nil {
-		return RemoteMediaMatch{}, fmt.Errorf("failed to unmarshal protobuf: %w", err)
-	}
-
-	return RemoteMediaMatch{
-		PrimaryMediaKey: pbResp.GetMediaKey(),
-		RelatedMediaKey: pbResp.GetField1().GetField2().GetField2().GetField6().GetMediaKey(),
-	}, nil
+	return bodyBytes, nil
 }
 
 // UploadProgressCallback is called with progress updates during file upload
