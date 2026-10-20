@@ -62,25 +62,15 @@ type uploadRunSettings struct {
 }
 
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
-	if report, _ := cmd.Flags().GetString("retry-report"); report != "" {
+	retry, _ := cmd.Flags().GetString("retry-report")
+	if retry != "" {
 		var err error
 		pair, _ := cmd.Flags().GetBool("pair-live-photos")
-		paths, err = retryReportPaths(report, pair, cmd.ErrOrStderr())
+		paths, err = retryReportPaths(retry, pair, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
 		paths = existingRetryPaths(paths, cmd.ErrOrStderr())
-		if len(paths) == 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "No failed non-skipped files to retry")
-			// Still write the (empty) summary, so --report-file is never stale.
-			if err := validateReportFile(cmd.Flags()); err != nil {
-				return err
-			}
-			model := initialModel()
-			model.workingDir, _ = os.Getwd()
-			reportFile, _ := cmd.Flags().GetString("report-file")
-			return finishUpload(model, cmd.OutOrStdout(), reportFile)
-		}
 	}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
@@ -101,6 +91,14 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	opts := uploadOptionsFromFlags(f)
 	if err := validateUploadOptions(f, opts); err != nil {
 		return err
+	}
+	if retry != "" && len(paths) == 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "No failed non-skipped files to retry")
+		// Still write the (empty) summary, so --report-file is never stale.
+		model := initialModel()
+		model.workingDir, _ = os.Getwd()
+		reportFile, _ := f.GetString("report-file")
+		return finishUpload(model, cmd.OutOrStdout(), reportFile)
 	}
 
 	logLevel, _ := f.GetString("log-level")

@@ -136,11 +136,13 @@ func TestRetrySkipsMissingFiles(t *testing.T) {
 }
 
 func TestEmptyRetryStillWritesReport(t *testing.T) {
+	previousConfig, previousPath := core.AppConfig, core.ConfigPath
+	t.Cleanup(func() { core.AppConfig, core.ConfigPath = previousConfig, previousPath })
 	dir := t.TempDir()
 	retry := writeRetryReport(t, `{"results":[{"path":"ok.jpg","success":true}]}`)
 	out := filepath.Join(dir, "retry-report.json")
 	cmd := newRootCommand(Info{})
-	cmd.SetArgs([]string{"upload", "--retry-report", retry, "--report-file", out})
+	cmd.SetArgs([]string{"upload", "--retry-report", retry, "--report-file", out, "--config", filepath.Join(dir, "gotohp.config")})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	if err := cmd.Execute(); err != nil {
@@ -149,5 +151,27 @@ func TestEmptyRetryStillWritesReport(t *testing.T) {
 	data, err := os.ReadFile(out)
 	if err != nil || !strings.Contains(string(data), `"total": 0`) {
 		t.Fatalf("report not written: %v %s", err, data)
+	}
+}
+
+// With nothing left to retry, the report is still written, so it must be
+// checked against the config in use, which may come from a default location.
+func TestEmptyRetryDoesNotOverwriteDefaultConfig(t *testing.T) {
+	previousConfig, previousPath := core.AppConfig, core.ConfigPath
+	t.Cleanup(func() { core.AppConfig, core.ConfigPath = previousConfig, previousPath })
+	core.ConfigPath = ""
+	dir := t.TempDir()
+	t.Chdir(dir) // the working directory is one of the default config locations
+	config := []byte("account:\n    selected: tester@example.com\n")
+	if err := os.WriteFile("gotohp.config", config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	retry := writeRetryReport(t, `{"results":[{"path":"ok.jpg","success":true}]}`)
+	code := Run([]string{"upload", "--retry-report", retry, "--no-tui", "--report-file", "gotohp.config"}, Info{ExecutableName: "gotohp-cli"})
+	if code == 0 {
+		t.Error("an empty retry was allowed to write its report over the config in use")
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "gotohp.config")); err != nil || !bytes.Equal(data, config) {
+		t.Fatalf("config was replaced: %v\n%s", err, data)
 	}
 }
