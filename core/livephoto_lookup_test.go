@@ -77,7 +77,7 @@ func TestRecheckStopsOnErrorOrCancellation(t *testing.T) {
 	}
 }
 
-// The outcome that matters: a pair whose still only shows up on the recheck
+// The outcome that matters: a pair whose still photo only shows up on the recheck
 // is skipped, not uploaded as a duplicate Live Photo. lookupAPI has no upload
 // or commit methods, so reaching them panics.
 func TestLaggingStillPreventsADuplicateLivePhoto(t *testing.T) {
