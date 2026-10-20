@@ -8,10 +8,10 @@ import (
 )
 
 // FindRemoteMediaByHashes looks up several SHA-1 hashes in one request. The
-// result maps each hash (as a string of its bytes) to its match; a hash not
-// in the library maps to an empty match. Every requested hash is in the
-// result, or the call fails, so a missing answer is never mistaken for
-// "not in the library".
+// result maps each answered hash (as a string of its bytes) to its match; a
+// hash not in the library maps to an empty match. A hash the server did not
+// answer is absent from the result, and callers must treat it as unknown,
+// never as "not in the library".
 func (a *Api) FindRemoteMediaByHashes(ctx context.Context, hashes [][]byte) (map[string]RemoteMediaMatch, error) {
 	var matches map[string]RemoteMediaMatch
 	err := a.withRetry(ctx, a.retryConfig(), func(int) error {
@@ -19,7 +19,7 @@ func (a *Api) FindRemoteMediaByHashes(ctx context.Context, hashes [][]byte) (map
 		if err != nil {
 			return err
 		}
-		matches, err = decodeHashBatch(body, hashes)
+		matches, err = decodeHashBatch(body)
 		return err
 	})
 	return matches, err
@@ -45,8 +45,8 @@ func encodeHashBatch(hashes [][]byte) []byte {
 // decodeHashBatch reads a RemoteMatches response with one entry per hash:
 // field 1 { repeated field 2 { field 1 { bytes sha1 = 1 }, field 2 {
 // string media_key = 1, field 6 { string media_key = 1 } } } }.
-func decodeHashBatch(body []byte, hashes [][]byte) (map[string]RemoteMediaMatch, error) {
-	matches := make(map[string]RemoteMediaMatch, len(hashes))
+func decodeHashBatch(body []byte) (map[string]RemoteMediaMatch, error) {
+	matches := make(map[string]RemoteMediaMatch)
 	err := eachField(body, func(num protowire.Number, v []byte) error {
 		if num != 1 {
 			return nil
@@ -95,11 +95,6 @@ func decodeHashBatch(body []byte, hashes [][]byte) (map[string]RemoteMediaMatch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("decode batch hash lookup: %w", err)
-	}
-	for _, h := range hashes {
-		if _, ok := matches[string(h)]; !ok {
-			return nil, fmt.Errorf("batch hash lookup returned no answer for %x", h)
-		}
 	}
 	return matches, nil
 }

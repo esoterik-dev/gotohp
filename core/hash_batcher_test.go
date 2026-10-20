@@ -35,7 +35,7 @@ func batchResponse(entries map[string]string, order [][]byte) []byte {
 func TestDecodeHashBatch(t *testing.T) {
 	a, b, u := bytes.Repeat([]byte{1}, 20), bytes.Repeat([]byte{2}, 20), bytes.Repeat([]byte{3}, 20)
 	body := batchResponse(map[string]string{string(a): "AF1QipA", string(b): "AF1QipB"}, [][]byte{a, b, u})
-	got, err := decodeHashBatch(body, [][]byte{a, b, u})
+	got, err := decodeHashBatch(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,10 +43,11 @@ func TestDecodeHashBatch(t *testing.T) {
 		got[string(b)].PrimaryMediaKey != "AF1QipB" || got[string(u)].PrimaryMediaKey != "" {
 		t.Fatalf("got %+v", got)
 	}
-	// A hash the server did not answer must be an error, never "not found":
-	// treating it as new would upload a duplicate.
-	if _, err := decodeHashBatch(batchResponse(nil, [][]byte{a}), [][]byte{a, b}); err == nil {
-		t.Fatal("missing answer accepted")
+	// A hash the server did not answer must be absent, never an empty
+	// "not found" match: treating it as new would upload a duplicate.
+	got, err = decodeHashBatch(batchResponse(nil, [][]byte{a}))
+	if _, answered := got[string(b)]; err != nil || answered {
+		t.Fatalf("unanswered hash in result: %+v, %v", got, err)
 	}
 	if !bytes.Contains(encodeHashBatch([][]byte{a, b}), a) {
 		t.Fatal("request lacks a hash")

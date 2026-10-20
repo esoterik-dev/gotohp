@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -94,7 +95,9 @@ func (b *hashBatcher) run() {
 	}
 }
 
-// send looks a batch up in one request and answers every lookup in it.
+// send looks a batch up in one request and answers every lookup in it. A
+// hash missing from the reply fails only its own lookups, so a server quirk
+// can never make a file look new and be uploaded again.
 func (b *hashBatcher) send(batch []hashLookup) {
 	seen := make(map[string]bool, len(batch))
 	hashes := make([][]byte, 0, len(batch))
@@ -110,6 +113,11 @@ func (b *hashBatcher) send(batch []hashLookup) {
 			l.reply <- hashLookupReply{err: err}
 			continue
 		}
-		l.reply <- hashLookupReply{key: matches[string(l.hash)].PrimaryMediaKey}
+		match, ok := matches[string(l.hash)]
+		if !ok {
+			l.reply <- hashLookupReply{err: fmt.Errorf("batch hash lookup returned no answer for %x", l.hash)}
+			continue
+		}
+		l.reply <- hashLookupReply{key: match.PrimaryMediaKey}
 	}
 }
