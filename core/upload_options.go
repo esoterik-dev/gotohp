@@ -13,6 +13,9 @@ type UploadOptions struct {
 	DeleteFromHost                bool
 	DisableUnsupportedFilesFilter bool
 	SetDateFromFilename           bool
+	// StageLocal copies each upload work item to os.TempDir (TMPDIR on Unix)
+	// before hashing and uploading. This is useful for FUSE/device sources.
+	StageLocal bool
 
 	PairLivePhotos             bool
 	SkipIncompleteLivePhotos   bool

@@ -18,6 +18,7 @@ type LivePhotoUploadOptions struct {
 	Policy                     LivePhotoCommitPolicy
 	DeleteFromHost             bool
 	SetDateFromFilename        bool
+	StageLocal                 bool
 	UpdateExistingPhotosToLive bool
 }
 
@@ -37,8 +38,28 @@ func uploadLivePhotoWithCallback(
 	if err != nil {
 		return "", false, fmt.Errorf("stat Live Photo video: %w", err)
 	}
-	totalBytes := photoInfo.Size() + videoInfo.Size()
 	displayName := filepath.Base(pair.PhotoPath) + " + " + filepath.Base(pair.VideoPath)
+	// uploadPair is what gets hashed and uploaded; pair stays the source for
+	// names, dates and deletion.
+	uploadPair := pair
+	var staged *stagedFiles
+	if options.StageLocal {
+		reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "staging",
+			FilePath: pair.PhotoPath,
+			FileName: displayName,
+			Message:  "Copying Live Photo pair to local temporary storage...",
+		})
+		staged, err = stageFilesLocally(ctx, []string{pair.PhotoPath, pair.VideoPath})
+		if err != nil {
+			return "", false, fmt.Errorf("stage Live Photo pair locally: %w", err)
+		}
+		defer staged.cleanup()
+		uploadPair = LivePhotoPair{PhotoPath: staged.paths[0], VideoPath: staged.paths[1]}
+		photoInfo, videoInfo = staged.infos[0], staged.infos[1]
+	}
+	totalBytes := photoInfo.Size() + videoInfo.Size()
 	reporter.ThreadStatus(ThreadStatus{
 		WorkerID: workerID,
 		Status:   "hashing",
@@ -47,11 +68,11 @@ func uploadLivePhotoWithCallback(
 		Message:  "Hashing Live Photo pair...",
 	})
 
-	photoSHA1, err := CalculateSHA1(ctx, pair.PhotoPath)
+	photoSHA1, err := CalculateSHA1(ctx, uploadPair.PhotoPath)
 	if err != nil {
 		return "", false, fmt.Errorf("hash Live Photo still: %w", err)
 	}
-	videoSHA1, err := CalculateSHA1(ctx, pair.VideoPath)
+	videoSHA1, err := CalculateSHA1(ctx, uploadPair.VideoPath)
 	if err != nil {
 		return "", false, fmt.Errorf("hash Live Photo video: %w", err)
 	}
@@ -77,7 +98,9 @@ func uploadLivePhotoWithCallback(
 			mediaKey, err := reconcileExistingLivePhoto(
 				ctx,
 				api,
+				uploadPair,
 				pair,
+				staged,
 				photoInfo,
 				videoInfo,
 				photoSHA1,
@@ -113,11 +136,11 @@ func uploadLivePhotoWithCallback(
 		return "", true, nil
 	}
 
-	photoToken, err := uploadLivePhotoComponent(ctx, api, pair.PhotoPath, pair.PhotoPath, photoInfo.Size(), photoSHA1, 0, totalBytes, workerID, displayName, reporter)
+	photoToken, err := uploadLivePhotoComponent(ctx, api, uploadPair.PhotoPath, pair.PhotoPath, photoInfo.Size(), photoSHA1, 0, totalBytes, workerID, displayName, reporter)
 	if err != nil {
 		return "", false, fmt.Errorf("upload Live Photo still: %w", err)
 	}
-	videoToken, err := uploadLivePhotoComponent(ctx, api, pair.VideoPath, pair.PhotoPath, videoInfo.Size(), videoSHA1, photoInfo.Size(), totalBytes, workerID, displayName, reporter)
+	videoToken, err := uploadLivePhotoComponent(ctx, api, uploadPair.VideoPath, pair.PhotoPath, videoInfo.Size(), videoSHA1, photoInfo.Size(), totalBytes, workerID, displayName, reporter)
 	if err != nil {
 		return "", false, fmt.Errorf("upload Live Photo video: %w", err)
 	}
@@ -155,7 +178,7 @@ func uploadLivePhotoWithCallback(
 	}
 
 	if options.DeleteFromHost {
-		if err := removeLivePhotoFiles(pair); err != nil {
+		if err := removeLivePhotoSources(pair, staged); err != nil {
 			return mediaKey, false, err
 		}
 	}
@@ -165,7 +188,9 @@ func uploadLivePhotoWithCallback(
 func reconcileExistingLivePhoto(
 	ctx context.Context,
 	api livePhotoUploadAPI,
+	uploadPair LivePhotoPair,
 	pair LivePhotoPair,
+	staged *stagedFiles,
 	photoInfo os.FileInfo,
 	videoInfo os.FileInfo,
 	photoSHA1 []byte,
@@ -185,7 +210,7 @@ func reconcileExistingLivePhoto(
 	videoToken, err := uploadLivePhotoComponent(
 		ctx,
 		api,
-		pair.VideoPath,
+		uploadPair.VideoPath,
 		pair.PhotoPath,
 		videoInfo.Size(),
 		videoSHA1,
@@ -230,7 +255,7 @@ func reconcileExistingLivePhoto(
 		return "", fmt.Errorf("updated Live Photo media key not received")
 	}
 	if options.DeleteFromHost {
-		if err := removeLivePhotoFiles(pair); err != nil {
+		if err := removeLivePhotoSources(pair, staged); err != nil {
 			return mediaKey, err
 		}
 	}
@@ -267,6 +292,15 @@ func uploadLivePhotoComponent(
 		})
 	}
 	return api.UploadFileWithHashAndProgress(ctx, componentPath, hash, size, progress)
+}
+
+// removeLivePhotoSources deletes an uploaded pair, refusing if either source
+// changed after it was staged.
+func removeLivePhotoSources(pair LivePhotoPair, staged *stagedFiles) error {
+	if err := staged.verifySourcesUnchanged(); err != nil {
+		return err
+	}
+	return removeLivePhotoFiles(pair)
 }
 
 func removeLivePhotoFiles(pair LivePhotoPair) error {
