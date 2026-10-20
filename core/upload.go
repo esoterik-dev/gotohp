@@ -25,8 +25,12 @@ type StartUploadEvent struct {
 }
 
 type UploadManager struct {
-	mu       sync.Mutex
-	wg       sync.WaitGroup
+	mu sync.Mutex
+	wg sync.WaitGroup
+	// stop ends the run gracefully: nothing new starts and in-flight items
+	// finish. cancel also aborts in-flight items; it implies stop.
+	stop     chan struct{}
+	stopped  bool
 	cancel   chan struct{}
 	canceled bool
 	running  bool
@@ -57,9 +61,26 @@ func (m *UploadManager) IsRunning() bool {
 	return m.running
 }
 
+// Stop lets in-flight items finish but starts no new ones. Albums are still
+// created for the items that finished.
+func (m *UploadManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopLocked()
+}
+
+func (m *UploadManager) stopLocked() {
+	if m.stop != nil && !m.stopped {
+		close(m.stop)
+		m.stopped = true
+	}
+}
+
+// Cancel aborts in-flight items as well as stopping the run.
 func (m *UploadManager) Cancel() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stopLocked()
 	if m.cancel != nil && !m.canceled {
 		close(m.cancel)
 		m.canceled = true
@@ -81,6 +102,22 @@ func (m *UploadManager) isCancelled() bool {
 	default:
 		return false
 	}
+}
+
+// isStopped reports whether the run should start no new work.
+func (m *UploadManager) isStopped() bool {
+	select {
+	case <-m.getStopChan():
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *UploadManager) getStopChan() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stop
 }
 
 // getCancelChan returns the cancel channel safely
@@ -129,6 +166,8 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		return
 	}
 	m.running = true
+	m.stop = make(chan struct{})
+	m.stopped = false
 	m.cancel = make(chan struct{})
 	m.canceled = false
 	m.apiOptions = opts.Api
@@ -138,7 +177,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	// be cancelled from the UI.
 	m.reporter.UploadStart(UploadBatchStart{})
 
-	targetPaths, err := filterGooglePhotosFilesWithCancel(paths, opts, m.isCancelled)
+	targetPaths, err := filterGooglePhotosFilesWithCancel(paths, opts, m.isStopped)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			m.finish()
@@ -156,9 +195,9 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		Enabled:             opts.PairLivePhotos,
 		SkipIncomplete:      opts.SkipIncompleteLivePhotos,
 		IgnoreAppleMetadata: opts.IgnoreAppleMetadata,
-		Cancelled:           m.isCancelled,
+		Cancelled:           m.isStopped,
 	}, nil)
-	if m.isCancelled() {
+	if m.isStopped() {
 		m.finish()
 		return
 	}
@@ -214,7 +253,7 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	LOOP:
 		for _, item := range workItems {
 			select {
-			case <-m.cancel:
+			case <-m.stop:
 				break LOOP
 			case workChan <- item:
 			}
@@ -687,6 +726,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, results chan<- FileUploadResult, opts UploadOptions) {
 	defer m.wg.Done()
 	cancel := m.getCancelChan()
+	stop := m.getStopChan()
 
 	// Emit idle status initially
 	m.reporter.ThreadStatus(ThreadStatus{
@@ -708,7 +748,7 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 
 	for item := range workChan {
 		select {
-		case <-cancel:
+		case <-stop:
 			m.reporter.ThreadStatus(ThreadStatus{
 				WorkerID: workerID,
 				Status:   "idle",
