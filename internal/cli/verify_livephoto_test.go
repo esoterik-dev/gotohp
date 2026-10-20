@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"app/core"
@@ -104,14 +106,63 @@ func TestSourceRootResolvesByNameAndFolder(t *testing.T) {
 	}
 }
 
-func TestVerificationReportFileCannotReplaceInput(t *testing.T) {
-	input := filepath.Join(t.TempDir(), "upload.json")
-	writeFiles(t, input)
-	if err := validateVerificationReportFile(input, input); err == nil {
-		t.Fatal("allowed overwriting the upload report")
+const verifyTestConfig = "account:\n    selected: tester@example.com\n"
+
+// runVerifyInDir runs verify-live-photos on a one-pair report in a fresh
+// working directory, which is also a default config location. The configs
+// hold no credentials, so a run that gets past validation stops before any
+// request.
+func runVerifyInDir(t *testing.T, args ...string) error {
+	t.Helper()
+	previousConfig, previousPath := core.AppConfig, core.ConfigPath
+	t.Cleanup(func() { core.AppConfig, core.ConfigPath = previousConfig, previousPath })
+	core.ConfigPath = ""
+	t.Chdir(t.TempDir())
+	writeFiles(t, "IMG_1.HEIC", "IMG_1.MOV")
+	for name, data := range map[string]string{
+		"gotohp.config": verifyTestConfig,
+		"other.config":  verifyTestConfig,
+		"upload.json":   `{"results":[{"path":"IMG_1.HEIC","paths":["IMG_1.HEIC","IMG_1.MOV"],"success":true}]}`,
+	} {
+		if err := os.WriteFile(name, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := validateVerificationReportFile(input+".verify", input); err != nil {
+	if err := os.Mkdir("out", 0700); err != nil {
 		t.Fatal(err)
+	}
+	root := newRootCommand(Info{})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs(append([]string{"verify-live-photos", "upload.json", "--proxy", "http://127.0.0.1:1", "--max-retries", "0"}, args...))
+	return root.Execute()
+}
+
+func TestVerificationReportFileRefusedBeforeWork(t *testing.T) {
+	for name, args := range map[string][]string{
+		"upload report":  {"--report-file", "upload.json"},
+		"default config": {"--report-file", "gotohp.config"},
+		"--config":       {"--config", "other.config", "--report-file", "other.config"},
+		"directory":      {"--report-file", "out"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := runVerifyInDir(t, args...)
+			if err == nil || !strings.Contains(err.Error(), "--report-file") {
+				t.Fatalf("%v was not refused before verification: %v", args, err)
+			}
+			for _, config := range []string{"gotohp.config", "other.config"} {
+				if data, _ := os.ReadFile(config); string(data) != verifyTestConfig {
+					t.Fatalf("%s was replaced: %s", config, data)
+				}
+			}
+		})
+	}
+}
+
+func TestVerificationReportFileAllowsNewFile(t *testing.T) {
+	err := runVerifyInDir(t, "--report-file", "verification.json")
+	if err == nil || strings.Contains(err.Error(), "--report-file") {
+		t.Fatalf("a new report file should pass validation and stop at the API client: %v", err)
 	}
 }
 

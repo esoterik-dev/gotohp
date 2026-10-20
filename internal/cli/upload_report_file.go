@@ -18,13 +18,25 @@ var reportInputFlags = []string{"config", "retry-report"}
 // any upload starts.
 func validateReportFile(f *pflag.FlagSet) error {
 	output, _ := f.GetString("report-file")
+	inputs := make(map[string]string)
+	for _, name := range reportInputFlags {
+		if input, _ := f.GetString(name); input != "" {
+			inputs["--"+name] = input
+		}
+	}
+	return checkReportFile(output, inputs)
+}
+
+// checkReportFile is validateReportFile for any command: inputs maps a
+// description used in errors to a file the report must never replace. The
+// config in use is always protected, so load it before calling this.
+func checkReportFile(output string, inputs map[string]string) error {
 	if output == "" {
 		return nil
 	}
-	for _, name := range reportInputFlags {
-		input, _ := f.GetString(name)
-		if input != "" && samePath(output, input) {
-			return fmt.Errorf("--report-file must not overwrite --%s", name)
+	for name, input := range inputs {
+		if samePath(output, input) {
+			return fmt.Errorf("--report-file must not overwrite %s", name)
 		}
 	}
 	// The config in use may come from a default location rather than --config.

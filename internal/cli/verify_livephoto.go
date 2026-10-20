@@ -126,8 +126,11 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 	if limit < 0 {
 		return fmt.Errorf("limit must not be negative, got %d", limit)
 	}
+	if err := core.LoadConfig(getInheritedConfigPath(cmd)); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 	reportFile, _ := f.GetString("report-file")
-	if err := validateVerificationReportFile(reportFile, reportPath); err != nil {
+	if err := checkReportFile(reportFile, map[string]string{"the upload report": reportPath}); err != nil {
 		return err
 	}
 
@@ -149,9 +152,6 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 		pairs = pairs[:limit]
 	}
 
-	if err := core.LoadConfig(getInheritedConfigPath(cmd)); err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
 	account, _ := f.GetString("account")
 	proxy, _ := f.GetString("proxy")
 	policy, err := requestPolicyFromFlags(f)
@@ -188,23 +188,6 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 		return exitError{code: 1}
 	}
 	return nil
-}
-
-// validateVerificationReportFile checks that the report output neither
-// replaces the input report nor lands in an unwritable directory.
-func validateVerificationReportFile(reportFile, input string) error {
-	if reportFile == "" {
-		return nil
-	}
-	if samePath(reportFile, input) {
-		return fmt.Errorf("--report-file must not overwrite the upload report")
-	}
-	probe, err := os.CreateTemp(filepath.Dir(reportFile), ".gotohp-report-*")
-	if err != nil {
-		return fmt.Errorf("--report-file directory is not writable: %w", err)
-	}
-	_ = probe.Close()
-	return os.Remove(probe.Name())
 }
 
 // verifyPairs checks pairs on threads workers. Pairs not started before ctx
