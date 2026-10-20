@@ -1,10 +1,10 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 )
 
 // AlbumError represents an album creation error
@@ -34,30 +34,23 @@ type AlbumManager struct {
 	api      *Api
 	reporter UploadReporter
 	logger   *slog.Logger
-	cancel   <-chan struct{}
+	ctx      context.Context
 }
 
-// NewAlbumManager creates a new AlbumManager
-func NewAlbumManager(api *Api, reporter UploadReporter, logger *slog.Logger, cancel <-chan struct{}) *AlbumManager {
+// NewAlbumManager creates a new AlbumManager. Canceling ctx stops album work,
+// including in-flight requests and retry waits.
+func NewAlbumManager(ctx context.Context, api *Api, reporter UploadReporter, logger *slog.Logger) *AlbumManager {
 	return &AlbumManager{
 		api:      api,
 		reporter: reporter,
 		logger:   logger,
-		cancel:   cancel,
+		ctx:      ctx,
 	}
 }
 
 // isCancelled checks if cancellation has been requested
 func (m *AlbumManager) isCancelled() bool {
-	if m.cancel == nil {
-		return false
-	}
-	select {
-	case <-m.cancel:
-		return true
-	default:
-		return false
-	}
+	return m.ctx.Err() != nil
 }
 
 // IsAlbumKey checks if the input looks like an album media key (starts with "AF1Qip")
@@ -133,48 +126,11 @@ func (m *AlbumManager) addToExistingAlbum(mediaKeys []string, albumKey string) (
 	return []string{albumKey}, nil
 }
 
-// addMediaWithRetry adds media to an album with retry logic
+// addMediaWithRetry adds media to an album, retrying transient failures.
 func (m *AlbumManager) addMediaWithRetry(albumKey string, mediaKeys []string) error {
-	retryConfig := DefaultRetryConfig()
-	var lastErr error
-
-	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
-		if attempt > 0 {
-			// Check for cancellation before retry delay
-			if m.isCancelled() {
-				return fmt.Errorf("cancelled during retry")
-			}
-			delay := CalculateBackoff(attempt-1, retryConfig)
-			time.Sleep(delay)
-		}
-
-		err := m.api.AddMediaToAlbum(albumKey, mediaKeys)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-
-		// Don't retry on 4xx errors (except 429)
-		if !isRetryableAlbumError(err) {
-			return err
-		}
-	}
-
-	return fmt.Errorf("failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
-}
-
-// isRetryableAlbumError checks if an error should be retried
-func isRetryableAlbumError(err error) bool {
-	errStr := err.Error()
-	// Retry on 5xx errors or 429 (rate limit)
-	if strings.Contains(errStr, "status 5") || strings.Contains(errStr, "status 429") {
-		return true
-	}
-	// Retry on network errors
-	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
-		return true
-	}
-	return false
+	return m.api.withRetry(m.ctx, m.api.retryConfig(), func(int) error {
+		return m.api.AddMediaToAlbum(m.ctx, albumKey, mediaKeys)
+	})
 }
 
 // createNewAlbum creates a new album with the given name and adds media to it
@@ -260,32 +216,13 @@ func (m *AlbumManager) createNewAlbum(mediaKeys []string, albumName string) ([]s
 	return albumKeys, nil
 }
 
-// createAlbumWithRetry creates an album with retry logic
+// createAlbumWithRetry creates an album, retrying transient failures.
 func (m *AlbumManager) createAlbumWithRetry(albumName string, mediaKeys []string) (string, error) {
-	retryConfig := DefaultRetryConfig()
-	var lastErr error
-
-	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
-		if attempt > 0 {
-			// Check for cancellation before retry delay
-			if m.isCancelled() {
-				return "", fmt.Errorf("cancelled during retry")
-			}
-			delay := CalculateBackoff(attempt-1, retryConfig)
-			time.Sleep(delay)
-		}
-
-		albumKey, err := m.api.CreateAlbum(albumName, mediaKeys)
-		if err == nil {
-			return albumKey, nil
-		}
-		lastErr = err
-
-		// Don't retry on 4xx errors (except 429)
-		if !isRetryableAlbumError(err) {
-			return "", err
-		}
-	}
-
-	return "", fmt.Errorf("failed after %d attempts: %w", retryConfig.MaxRetries+1, lastErr)
+	var albumKey string
+	err := m.api.withRetry(m.ctx, m.api.retryConfig(), func(int) error {
+		var err error
+		albumKey, err = m.api.CreateAlbum(m.ctx, albumName, mediaKeys)
+		return err
+	})
+	return albumKey, err
 }

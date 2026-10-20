@@ -296,11 +296,11 @@ func validateGooglePhotosCredential(credential string, proxy string) error {
 		return err
 	}
 	api.client.CheckRedirect = rejectGoogleAuthRedirect
-	if _, err := api.BearerToken(); err != nil {
+	if _, err := api.BearerToken(context.Background()); err != nil {
 		return err
 	}
 
-	mediaKey, err := api.FindRemoteMediaByHash(make([]byte, 20))
+	mediaKey, err := api.FindRemoteMediaByHash(context.Background(), make([]byte, 20))
 	if err != nil {
 		return err
 	}

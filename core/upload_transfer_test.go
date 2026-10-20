@@ -18,16 +18,16 @@ func TestUploadRetryClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{&uploadHTTPError{statusCode: 429}, true},
-		{&uploadHTTPError{statusCode: 503}, true},
+		{&httpStatusError{statusCode: 429}, true},
+		{&httpStatusError{statusCode: 503}, true},
 		// Body captured from a real failed upload (gp-run reports, 2026-09).
-		{&uploadHTTPError{statusCode: 400, body: "Checksum from header does not match received payload content."}, true},
-		{&uploadHTTPError{statusCode: 400, body: "invalid media"}, false},
+		{&httpStatusError{statusCode: 400, body: "Checksum from header does not match received payload content."}, true},
+		{&httpStatusError{statusCode: 400, body: "invalid media"}, false},
 		{fmt.Errorf("invalid upload finalize response: %w: %w", errBadUploadResponse, errors.New("bad tag")), true},
 		{fmt.Errorf("read: %w", io.ErrUnexpectedEOF), true},
 		{context.Canceled, false}, {errors.New("invalid response"), false},
 	} {
-		if got := shouldRetryUploadError(tc.err); got != tc.want {
+		if got := (&Api{}).shouldRetry(tc.err); got != tc.want {
 			t.Errorf("%v: got %v, want %v", tc.err, got, tc.want)
 		}
 	}
@@ -47,15 +47,11 @@ func TestUploadSendsExactBodyLength(t *testing.T) {
 	defer server.Close()
 	api := &Api{client: server.Client(), authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"}}
 	_, err := api.doUploadRequest(context.Background(), server.URL, strings.NewReader("photo"), 5)
-	var httpErr *uploadHTTPError
+	var httpErr *httpStatusError
 	if !errors.As(err, &httpErr) || httpErr.statusCode != 429 {
 		t.Fatalf("got %v", err)
 	}
 }
-
-type uploadRoundTrip func(*http.Request) (*http.Response, error)
-
-func (f uploadRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestUploadRetryOpensNewSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "photo.jpg")
@@ -65,7 +61,7 @@ func TestUploadRetryOpensNewSession(t *testing.T) {
 	var sessions, uploads []string
 	api := &Api{
 		authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
-		client: &http.Client{Transport: uploadRoundTrip(func(r *http.Request) (*http.Response, error) {
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.Method == http.MethodPut {
 				uploads = append(uploads, r.URL.Query().Get("upload_id"))
 				body := "Checksum from header does not match received payload content."
