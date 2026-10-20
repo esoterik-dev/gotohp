@@ -55,7 +55,7 @@ func TestRetryAfter(t *testing.T) {
 
 func TestSharedCooldownCancelsEveryWorker(t *testing.T) {
 	p := mustPolicy(t, DefaultMaxRetries, true, DefaultRequestsPerMinute)
-	p.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}))
+	p.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}), true)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -73,7 +73,7 @@ func TestSharedCooldownCancelsEveryWorker(t *testing.T) {
 
 func TestRequestHonoursCallerContext(t *testing.T) {
 	policy := mustPolicy(t, 0, true, 0)
-	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}))
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}), true)
 	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
 		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Error("request sent during cooldown")
@@ -90,7 +90,7 @@ func TestRequestHonoursCallerContext(t *testing.T) {
 // honour the caller's context too; otherwise Ctrl+C hangs for the pause.
 func TestTokenRefreshHonoursCallerContext(t *testing.T) {
 	policy := mustPolicy(t, 0, true, 0)
-	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}))
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}), true)
 	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "stale", "Expiry": "0"},
 		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Error("auth request sent during cooldown")
@@ -197,10 +197,113 @@ func TestPolicyReportsPauses(t *testing.T) {
 	policy := mustPolicy(t, 0, true, 0)
 	var got []time.Time
 	policy.OnPause(func(until time.Time) { got = append(got, until) })
-	policy.observe(statusResponse(200, nil))
-	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"30"}}))
-	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"5"}})) // inside the pause
+	policy.observe(statusResponse(200, nil), true)
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"30"}}), true)
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"5"}}), true) // inside the pause
 	if len(got) != 1 || time.Until(got[0]) < 25*time.Second {
 		t.Fatalf("pauses reported: %v", got)
+	}
+}
+
+// After a 429, Photos RPCs are paced at half the rate that tripped it; the
+// pace relaxes by a fifth per 50 successful RPCs and then switches off.
+func TestAdaptivePacingAfterRateLimit(t *testing.T) {
+	p := mustPolicy(t, 0, true, 0)
+	now := time.Now()
+	for i := range 120 { // 120 RPCs in the last minute
+		p.recordRPC(now.Add(-time.Duration(120-i) * 400 * time.Millisecond))
+	}
+	p.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}), true)
+	if p.adaptive != time.Second { // 60 per minute
+		t.Fatalf("adaptive interval %v, want 1s", p.adaptive)
+	}
+	// Another worker's 429 from the same burst extends the pause only.
+	p.observe(statusResponse(429, http.Header{"Retry-After": []string{"60"}}), true)
+	if p.adaptive != time.Second {
+		t.Fatalf("second 429 of one burst slowed again: %v", p.adaptive)
+	}
+	for range adaptiveRelaxAfter {
+		p.observe(statusResponse(200, nil), true)
+	}
+	if p.adaptive != 800*time.Millisecond {
+		t.Fatalf("after %d successes interval %v, want 800ms", adaptiveRelaxAfter, p.adaptive)
+	}
+	for range 40 * adaptiveRelaxAfter {
+		p.observe(statusResponse(200, nil), true)
+	}
+	if p.adaptive != 0 {
+		t.Fatalf("pacing never switched off: %v", p.adaptive)
+	}
+	p.observe(statusResponse(200, nil), false) // other hosts never count
+}
+
+// A second 429 while already paced halves the rate again.
+func TestAdaptivePacingBacksOffFurther(t *testing.T) {
+	p := mustPolicy(t, 0, true, 0)
+	p.adaptive = 500 * time.Millisecond
+	for range 200 { // half of 200/min is 600ms, so doubling 500ms wins
+		p.recordRPC(time.Now())
+	}
+	p.slowDown()
+	if p.adaptive != time.Second {
+		t.Fatalf("interval %v, want 1s", p.adaptive)
+	}
+	p.slowDown()
+	p.slowDown()
+	if p.adaptive != adaptiveMaximum {
+		t.Fatalf("interval %v, want the %v cap", p.adaptive, adaptiveMaximum)
+	}
+}
+
+// A 429 after only a few requests (say, a quota already used up by another
+// run) pauses, but must not throttle the rest of the run.
+func TestFewRequestsDoNotAdapt(t *testing.T) {
+	p := mustPolicy(t, 0, true, 0)
+	p.recordRPC(time.Now())
+	p.observe(statusResponse(429, http.Header{"Retry-After": []string{"0"}}), true)
+	if p.adaptive != 0 {
+		t.Fatalf("adapted to %v after one request", p.adaptive)
+	}
+}
+
+// wait spaces Photos RPCs by the adaptive interval even with pacing off.
+func TestWaitHonoursAdaptiveInterval(t *testing.T) {
+	p := mustPolicy(t, 0, true, 0)
+	p.adaptive = 60 * time.Millisecond
+	start := time.Now()
+	for range 3 {
+		if err := p.wait(context.Background(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 120*time.Millisecond {
+		t.Fatalf("3 RPCs in %v, want >= 120ms apart in total", elapsed)
+	}
+}
+
+// README: after a 429, Photos requests run at half the number sent in the
+// last minute. Through the real request path: 120 requests, a 429, then
+// requests 1 s apart (60 a minute).
+func TestRateLimitSlowsLaterRequests(t *testing.T) {
+	policy := mustPolicy(t, 0, true, 0)
+	var sent []time.Time
+	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			sent = append(sent, time.Now())
+			if len(sent) == 120 {
+				return statusResponse(429, http.Header{"Retry-After": []string{"0"}}), nil
+			}
+			return statusResponse(200, nil), nil
+		})}}
+	for range 123 {
+		_, _ = api.FindRemoteMediaByHash(context.Background(), make([]byte, 20))
+	}
+	if len(sent) != 123 {
+		t.Fatalf("%d requests sent", len(sent))
+	}
+	for i := 121; i < len(sent); i++ {
+		if gap := sent[i].Sub(sent[i-1]); gap < 900*time.Millisecond || gap > 1500*time.Millisecond {
+			t.Fatalf("request %d sent %v after the previous one, want about 1s", i, gap)
+		}
 	}
 }

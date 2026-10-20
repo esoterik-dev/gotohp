@@ -34,6 +34,13 @@ type RequestPolicy struct {
 	mu       sync.Mutex
 	next     time.Time
 	cooldown time.Time
+	// adaptive paces Photos RPCs after a 429 even when interval is 0: it is
+	// set to half the number of RPCs sent in the last minute and relaxed step by step
+	// while requests succeed (see observe). The slower of interval and
+	// adaptive applies.
+	adaptive time.Duration
+	okSince  int         // successful RPCs since adaptive last changed
+	recent   []time.Time // when recent Photos RPCs were sent, last minute
 
 	// logger receives request, wait, 429 and retry events; see SetLogger.
 	logger *slog.Logger
@@ -89,8 +96,9 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 		}
 		p.mu.Lock()
 		now := time.Now()
+		interval := max(p.interval, p.adaptive)
 		ready := p.cooldown
-		if rpc && p.interval > 0 && p.next.After(ready) {
+		if rpc && interval > 0 && p.next.After(ready) {
 			ready = p.next
 		}
 		delay := ready.Sub(now)
@@ -100,8 +108,11 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 			delay += time.Duration(rand.Int63n(int64(cooldownJitter)))
 		}
 		if delay <= 0 {
-			if rpc && p.interval > 0 {
-				p.next = now.Add(p.interval)
+			if rpc {
+				if interval > 0 {
+					p.next = now.Add(interval)
+				}
+				p.recordRPC(now)
 			}
 			p.mu.Unlock()
 			return nil
@@ -118,14 +129,85 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 	}
 }
 
-func (p *RequestPolicy) observe(resp *http.Response) {
+// Adaptive pacing after a 429: start at half the RPCs sent in the last minute, and
+// speed up by a fifth after every adaptiveRelaxAfter successful RPCs until
+// pacing is off again.
+const (
+	adaptiveRelaxAfter = 50
+	adaptiveMinimum    = 20 * time.Millisecond
+	// adaptiveSample is the fewest RPCs in the last minute that say our own
+	// rate tripped the quota; with fewer (say, a quota already used up by
+	// another run) the 429 pause alone applies.
+	adaptiveSample = 20
+	// adaptiveMaximum caps the slowest adaptive pace at 30 RPCs a minute.
+	adaptiveMaximum = 2 * time.Second
+)
+
+// recordRPC notes that a Photos RPC is sent at now. Callers hold p.mu.
+func (p *RequestPolicy) recordRPC(now time.Time) {
+	cutoff := now.Add(-time.Minute)
+	i := 0
+	for i < len(p.recent) && p.recent[i].Before(cutoff) {
+		i++
+	}
+	p.recent = append(p.recent[i:], now)
+}
+
+// slowDown halves the RPC rate seen in the last minute (or the current
+// adaptive rate, if that is already slower). Callers hold p.mu.
+func (p *RequestPolicy) slowDown() {
+	p.okSince = 0
+	perMinute := len(p.recent)
+	if perMinute < adaptiveSample {
+		return
+	}
+	next := min(max(time.Minute/time.Duration(perMinute/2), 2*p.adaptive), adaptiveMaximum)
+	if next != p.adaptive {
+		p.adaptive = next
+		p.log().Info("slowing Photos requests after a 429", "requests_per_minute", int(time.Minute/next))
+	}
+}
+
+// speedUp relaxes adaptive pacing after enough successful RPCs. Callers
+// hold p.mu.
+func (p *RequestPolicy) speedUp() {
+	if p.adaptive == 0 {
+		return
+	}
+	if p.okSince++; p.okSince < adaptiveRelaxAfter {
+		return
+	}
+	p.okSince = 0
+	p.adaptive = p.adaptive * 4 / 5
+	if p.adaptive < adaptiveMinimum {
+		p.adaptive = 0
+		p.log().Info("Photos requests back to full speed")
+		return
+	}
+	p.log().Debug("speeding up Photos requests", "requests_per_minute", int(time.Minute/p.adaptive))
+}
+
+// observe records the outcome of a request; rpc says whether it was a
+// Photos RPC (the paced kind).
+func (p *RequestPolicy) observe(resp *http.Response, rpc bool) {
 	if resp.StatusCode != http.StatusTooManyRequests {
+		if rpc && resp.StatusCode < 400 {
+			p.mu.Lock()
+			p.speedUp()
+			p.mu.Unlock()
+		}
 		return
 	}
 	now := time.Now()
 	until := now.Add(retryAfter(resp.Header.Get("Retry-After"), now))
 	p.mu.Lock()
+	// Several workers often get a 429 from the same burst; only the one that
+	// starts a pause slows the rate, the others just extend the pause.
+	newPause := !now.Before(p.cooldown)
 	extended := until.After(p.cooldown)
+	if newPause {
+		p.slowDown()
+	}
 	if extended {
 		p.cooldown = until
 		host := ""
@@ -268,7 +350,7 @@ func (a *Api) do(req *http.Request) (*http.Response, error) {
 	log.Debug("request", "method", req.Method, "host", req.URL.Hostname(), "path", req.URL.Path,
 		"status", resp.StatusCode, "duration_ms", time.Since(start).Milliseconds())
 	if a.policy != nil {
-		a.policy.observe(resp)
+		a.policy.observe(resp, req.URL.Hostname() == "photosdata-pa.googleapis.com")
 	}
 	return resp, err
 }
