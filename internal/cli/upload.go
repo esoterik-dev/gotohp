@@ -103,6 +103,7 @@ type uploadModel struct {
 	workingDir   string
 	// Album state
 	requestedAlbum  string // --album, or "AUTO"; empty when no album was asked for
+	albumCandidates bool   // a finished item has a media key, so core would add it to the album
 	albumName       string
 	albumItemsAdded int
 	albumTotalItems int
@@ -206,6 +207,9 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				result.Error = msg.err.Error()
 			}
 		}
+		if msg.mediaKey != "" && (msg.success || msg.skipped) {
+			m.albumCandidates = true
+		}
 		m.results = append(m.results, result)
 		return m, nil
 
@@ -261,8 +265,9 @@ func (m uploadModel) requestCancel(exitCode int) (tea.Model, tea.Cmd) {
 		if m.cancel != nil {
 			m.cancel()
 		}
-		// An aborted run creates no album, so the uploaded files are not in it.
-		if m.requestedAlbum != "" && m.completed > 0 && !m.albumComplete && m.albumError == "" {
+		// An aborted run creates no album, so finished items (uploads and remote
+		// duplicates alike) are not in it.
+		if m.requestedAlbum != "" && m.albumCandidates && !m.albumComplete && m.albumError == "" {
 			if m.albumName == "" {
 				m.albumName = m.requestedAlbum
 			}
