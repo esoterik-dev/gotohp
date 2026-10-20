@@ -662,3 +662,42 @@ func TestUploadedItemWithFailedCheckpointIsNotAFailure(t *testing.T) {
 		}
 	}
 }
+
+// queueRecorder records the queue lengths a run reports.
+type queueRecorder struct {
+	*runRecorder
+	mu      sync.Mutex
+	lengths []int
+}
+
+func (r *queueRecorder) QueueLength(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lengths = append(r.lengths, n)
+}
+
+// The UI learns how many hashed files wait for an upload worker, and that
+// the queue is empty at the end.
+func TestUploadReportsQueueLength(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 12)
+	lib := newFakeLibrary()
+	lib.uploadGate = make(chan struct{})
+	lib.uploadStarted = make(chan string, len(paths))
+	rec := &queueRecorder{runRecorder: newRunRecorder()}
+	m := NewUploadManager(rec, nil)
+	m.newAPI = func(ApiOptions) (uploadAPI, error) { return lib, nil }
+	m.Upload(paths, UploadOptions{HashThreads: 3, UploadThreads: 1})
+	<-lib.uploadStarted
+	time.Sleep(200 * time.Millisecond) // let the hash workers queue the rest
+	close(lib.uploadGate)
+	rec.wait(t)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	peak := 0
+	for _, n := range rec.lengths {
+		peak = max(peak, n)
+	}
+	if peak < 5 || rec.lengths[len(rec.lengths)-1] != 0 {
+		t.Fatalf("queue lengths %v", rec.lengths)
+	}
+}

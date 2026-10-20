@@ -37,7 +37,14 @@ type RequestPolicy struct {
 
 	// logger receives request, wait, 429 and retry events; see SetLogger.
 	logger *slog.Logger
+	// onPause, if set, is told whenever a 429 starts or extends the pause.
+	onPause func(until time.Time)
 }
+
+// OnPause registers fn to be called, outside any lock, whenever an HTTP 429
+// starts or extends the shared pause; until is when requests resume. Call
+// it before the run starts.
+func (p *RequestPolicy) OnPause(fn func(until time.Time)) { p.onPause = fn }
 
 // SetLogger sends the policy's events, and those of every Api built with it,
 // to logger: each request (debug), waits before a request (debug), 429
@@ -118,8 +125,8 @@ func (p *RequestPolicy) observe(resp *http.Response) {
 	now := time.Now()
 	until := now.Add(retryAfter(resp.Header.Get("Retry-After"), now))
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if until.After(p.cooldown) {
+	extended := until.After(p.cooldown)
+	if extended {
 		p.cooldown = until
 		host := ""
 		if resp.Request != nil {
@@ -128,6 +135,10 @@ func (p *RequestPolicy) observe(resp *http.Response) {
 		p.log().Warn("rate limited (HTTP 429): pausing all requests",
 			"host", host, "retry_after", resp.Header.Get("Retry-After"),
 			"pause_ms", until.Sub(now).Milliseconds(), "until", until.Format(time.RFC3339))
+	}
+	p.mu.Unlock()
+	if extended && p.onPause != nil {
+		p.onPause(until)
 	}
 }
 

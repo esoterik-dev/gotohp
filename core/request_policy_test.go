@@ -191,3 +191,16 @@ func TestPolicyLogsRequestsAndRateLimitPauses(t *testing.T) {
 		}
 	}
 }
+
+// The UI is told when a 429 pauses everything, and until when.
+func TestPolicyReportsPauses(t *testing.T) {
+	policy := mustPolicy(t, 0, true, 0)
+	var got []time.Time
+	policy.OnPause(func(until time.Time) { got = append(got, until) })
+	policy.observe(statusResponse(200, nil))
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"30"}}))
+	policy.observe(statusResponse(429, http.Header{"Retry-After": []string{"5"}})) // inside the pause
+	if len(got) != 1 || time.Until(got[0]) < 25*time.Second {
+		t.Fatalf("pauses reported: %v", got)
+	}
+}
