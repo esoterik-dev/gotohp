@@ -84,11 +84,15 @@ func TestSecondCancelForceQuitsWithFinishedResults(t *testing.T) {
 func TestForceQuitReportsUnfinishedAlbum(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		completed bool
+		finished  []fileCompleteMsg
 		wantAlbum bool
 	}{
-		{"files uploaded", true, true},
-		{"nothing uploaded", false, false},
+		{"files uploaded", []fileCompleteMsg{{fileName: "photo.jpg", success: true, mediaKey: "key"}}, true},
+		// Core adds a remote duplicate's existing item to the album too.
+		{"only remote duplicates", []fileCompleteMsg{{fileName: "photo.jpg", skipped: true, mediaKey: "existing"}}, true},
+		{"only skips without a media key", []fileCompleteMsg{{fileName: "live.heic", skipped: true}}, false},
+		{"only failures", []fileCompleteMsg{{fileName: "photo.jpg", err: errors.New("boom")}}, false},
+		{"nothing finished", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := initialModel()
@@ -96,8 +100,8 @@ func TestForceQuitReportsUnfinishedAlbum(t *testing.T) {
 			m.stop, m.cancel = func() {}, func() {}
 			updated, _ := m.Update(uploadStartMsg{total: 2})
 			m = updated.(uploadModel)
-			if tc.completed {
-				updated, _ = m.Update(fileCompleteMsg{fileName: "photo.jpg", success: true, mediaKey: "key"})
+			for _, msg := range tc.finished {
+				updated, _ = m.Update(msg)
 				m = updated.(uploadModel)
 			}
 			updated, _ = m.Update(cancelMsg{exitCode: exitCodeInterrupt})
@@ -112,7 +116,7 @@ func TestForceQuitReportsUnfinishedAlbum(t *testing.T) {
 			}
 			if !tc.wantAlbum {
 				if summary.Album != nil {
-					t.Fatalf("album reported although nothing was uploaded: %+v", summary.Album)
+					t.Fatalf("album reported although no finished item had a media key: %+v", summary.Album)
 				}
 				return
 			}
