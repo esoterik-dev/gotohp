@@ -257,8 +257,25 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 	// Hash workers also check for duplicates and finish items already in the
 	// library, so only real uploads wait for a network worker. They finish
 	// before workChan closes, so before the network workers and results do.
+	// Hash workers share checkApi for duplicate checks, which do not change
+	// it. *Api is not safe for concurrent uploads, so in one pool, where hash
+	// workers also upload, each creates its own client like an upload worker.
+	finishAPI := func(int) (uploadAPI, error) { return checkApi, nil }
+	if opts.UploadThreads == 0 {
+		// Hash worker IDs are 0..HashThreads-1 here, and each worker only
+		// touches its own entry.
+		clients := make([]uploadAPI, opts.HashThreads)
+		clientErrs := make([]error, opts.HashThreads)
+		finishAPI = func(workerID int) (uploadAPI, error) {
+			if clients[workerID] == nil && clientErrs[workerID] == nil {
+				clients[workerID], clientErrs[workerID] = m.newAPI(opts.Api)
+			}
+			return clients[workerID], clientErrs[workerID]
+		}
+	}
 	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, checkApi, m.reporter, func(workerID int, p preparedUpload) {
-		m.finishPrepared(workerID, checkApi, nil, p, results, opts)
+		api, apiErr := finishAPI(workerID)
+		m.finishPrepared(workerID, api, apiErr, p, results, opts)
 	})
 
 	// Start workers

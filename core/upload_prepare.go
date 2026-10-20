@@ -147,8 +147,9 @@ func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions,
 // finish on its hash worker, which uploads it. With a non-nil
 // finder, the same workers also run the duplicate check for single files, and
 // a file already in the library is passed to finish on that worker instead
-// of being queued. The returned queue holds at most opts.UploadThreads
-// prepared items, so hashing runs only a little ahead of uploading. Every
+// of being queued. With opts.StageLocal the returned queue holds at most
+// opts.UploadThreads prepared items, since each holds a temporary copy;
+// otherwise it is unbounded, so hash workers keep checking ahead. Every
 // started item yields exactly one preparedUpload or finish call, including
 // after cancellation. Closing stop, or canceling ctx, stops starting new
 // items; canceling ctx also aborts hashing in progress.

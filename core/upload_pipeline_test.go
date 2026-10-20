@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,6 +343,61 @@ func TestUploadThreadsAloneUsesOnePool(t *testing.T) {
 	}
 	if len(rec.workersWithStatus("uploading")) == 0 {
 		t.Fatal("no worker uploaded")
+	}
+}
+
+// sharedClientCheck is one API client of a run. *Api is not safe for
+// concurrent uploads (CommitUpload changes it), so it flags a client that
+// uploads two files at once.
+type sharedClientCheck struct {
+	*fakeLibrary
+	active  atomic.Int32
+	overlap *atomic.Bool
+}
+
+func (c *sharedClientCheck) UploadFileWithHashAndProgress(ctx context.Context, path string, hash []byte, size int64, progress UploadProgressCallback) (ScottyFinalizeToken, error) {
+	if c.active.Add(1) > 1 {
+		c.overlap.Store(true)
+	}
+	defer c.active.Add(-1)
+	return c.fakeLibrary.UploadFileWithHashAndProgress(ctx, path, hash, size, progress)
+}
+
+// As before the split, each worker that uploads has its own API client, in
+// one pool (--threads alone, and the GUI) and in the split.
+func TestConcurrentUploadsUseSeparateClients(t *testing.T) {
+	for name, opts := range map[string]UploadOptions{
+		"one pool": {Threads: 3},
+		"split":    {Threads: 1, HashThreads: 1, UploadThreads: 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			paths := writePhotos(t, t.TempDir(), 3)
+			lib := newFakeLibrary()
+			lib.uploadGate = make(chan struct{})
+			lib.uploadStarted = make(chan string, len(paths))
+			var overlap atomic.Bool
+			rec := newRunRecorder()
+			m := NewUploadManager(rec, nil)
+			m.newAPI = func(ApiOptions) (uploadAPI, error) {
+				return &sharedClientCheck{fakeLibrary: lib, overlap: &overlap}, nil
+			}
+			m.Upload(paths, opts)
+			for range paths { // all three uploads in flight at once
+				select {
+				case <-lib.uploadStarted:
+				case <-time.After(10 * time.Second):
+					t.Fatal("uploads did not run concurrently")
+				}
+			}
+			close(lib.uploadGate)
+			rec.wait(t)
+			if ok, _, failed := countResults(rec.results); ok != 3 || failed != 0 {
+				t.Fatalf("succeeded=%d failed=%d", ok, failed)
+			}
+			if overlap.Load() {
+				t.Fatal("one API client uploaded several files at once")
+			}
+		})
 	}
 }
 
