@@ -97,6 +97,7 @@ type runRecorder struct {
 	mu       sync.Mutex
 	results  []FileUploadResult
 	statuses []ThreadStatus
+	warnings []PreflightWarning
 	resultCh chan FileUploadResult
 	done     chan struct{}
 }
@@ -106,6 +107,12 @@ func newRunRecorder() *runRecorder {
 }
 
 func (r *runRecorder) UploadStop() { close(r.done) }
+
+func (r *runRecorder) Warning(w PreflightWarning) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.warnings = append(r.warnings, w)
+}
 
 func (r *runRecorder) ThreadStatus(s ThreadStatus) {
 	r.mu.Lock()
@@ -438,7 +445,7 @@ func TestCanceledRunKeepsKnownDuplicate(t *testing.T) {
 	prepared := prepareUpload(context.Background(), item, UploadOptions{}, 0, NopReporter{})
 	prepared.files[0].checked, prepared.files[0].remoteKey = true, "existing"
 	results := make(chan FileUploadResult, 1)
-	m.finishPrepared(0, newFakeLibrary(), nil, prepared, results, UploadOptions{})
+	m.finishPrepared(0, newFakeLibrary(), nil, prepared, results, UploadOptions{}, nil)
 	if res := <-results; !res.Skipped || res.MediaKey != "existing" {
 		t.Fatalf("known duplicate reported as %+v", res)
 	}
@@ -551,6 +558,107 @@ func TestUploadCtrlCDropsQueuedFiles(t *testing.T) {
 		}
 		if lib.uploads != 1 {
 			t.Fatalf("abort=%v: %d uploads; queued files must not start", abort, lib.uploads)
+		}
+	}
+}
+
+// README: with --state-file --update-state, a rerun skips confirmed items
+// without hashing or checking them, and cache-only hits never delete.
+func TestUploadRerunSkipsConfirmedItemsFromState(t *testing.T) {
+	dir := t.TempDir()
+	paths := writePhotos(t, filepath.Join(dir), 6)
+	lib := newFakeLibrary()
+	lib.add(t, paths[0])
+	opts := UploadOptions{
+		Api:         ApiOptions{Account: "user@example.com"},
+		HashThreads: 3, UploadThreads: 1,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true,
+	}
+	_, rec := startRun(lib, paths, opts)
+	rec.wait(t)
+	if ok, skipped, failed := countResults(rec.results); ok != 5 || skipped != 1 || failed != 0 {
+		t.Fatalf("first run: succeeded=%d skipped=%d failed=%d", ok, skipped, failed)
+	}
+
+	lookups := lib.lookups
+	opts.DeleteFromHost = true
+	_, rec = startRun(lib, paths, opts)
+	rec.wait(t)
+	for _, res := range rec.results {
+		if !res.Skipped || res.SkipCode != "state-cache" {
+			t.Fatalf("rerun result %+v", res)
+		}
+	}
+	if len(rec.results) != len(paths) || lib.lookups != lookups {
+		t.Fatalf("rerun: %d results, %d new lookups", len(rec.results), lib.lookups-lookups)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("cache-only hit deleted %s: %v", filepath.Base(p), err)
+		}
+	}
+}
+
+// A state file that cannot be opened (here: locked by another run) is one
+// run-level failure, not a failure per file.
+func TestUploadStateOpenFailureIsOneError(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 5)
+	opts := UploadOptions{Api: ApiOptions{Account: "user@example.com"}, Threads: 1,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true}
+	held, err := openUploadState(opts.normalized())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.close()
+	_, rec := startRun(newFakeLibrary(), paths, opts)
+	rec.wait(t)
+	if len(rec.results) != 1 || !rec.results[0].IsError || rec.results[0].Path != "" {
+		t.Fatalf("results=%+v", rec.results)
+	}
+}
+
+// README: with --stage-local the staged copy is uploaded even if its source
+// changed. --update-state cannot checkpoint that source, but the item is still
+// in the library: it is reported as uploaded with a warning, and not deleted.
+func TestUploadedItemWithFailedCheckpointIsNotAFailure(t *testing.T) {
+	paths := writePhotos(t, t.TempDir(), 2)
+	lib := newFakeLibrary()
+	lib.uploadGate = make(chan struct{})
+	lib.uploadStarted = make(chan string, len(paths))
+	_, rec := startRun(lib, paths, UploadOptions{
+		Api:         ApiOptions{Account: "user@example.com"},
+		HashThreads: 2, UploadThreads: 1, StageLocal: true, DeleteFromHost: true,
+		StateFile: filepath.Join(t.TempDir(), "state.jsonl"), UpdateState: true,
+	})
+	select {
+	case <-lib.uploadStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upload started")
+	}
+	time.Sleep(200 * time.Millisecond) // both files staged and hashed
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte("changed after staging"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(lib.uploadGate)
+	rec.wait(t)
+	for _, res := range rec.results {
+		if res.IsError || res.MediaKey == "" {
+			t.Fatalf("uploaded item reported as %+v", res)
+		}
+	}
+	if len(rec.warnings) != len(paths) {
+		t.Fatalf("warnings=%+v", rec.warnings)
+	}
+	for _, w := range rec.warnings {
+		if w.Code != "state-checkpoint-failed" {
+			t.Fatalf("warning %+v", w)
+		}
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("source without a checkpoint was deleted: %v", err)
 		}
 	}
 }

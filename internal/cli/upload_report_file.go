@@ -11,32 +11,41 @@ import (
 )
 
 // reportInputFlags names the flags whose files --report-file must never replace.
-var reportInputFlags = []string{"config", "retry-report"}
+var reportInputFlags = []string{"config", "retry-report", "state-file"}
+
+// reportInputSuffixes adds files derived from an input flag's path.
+var reportInputSuffixes = map[string][]string{"state-file": {".lock"}}
 
 // validateReportFile rejects a --report-file that would overwrite an input
 // file or names a directory, and checks that its directory is writable before
 // any upload starts.
 func validateReportFile(f *pflag.FlagSet) error {
 	output, _ := f.GetString("report-file")
-	inputs := make(map[string]string)
+	inputs := make(map[string][]string)
 	for _, name := range reportInputFlags {
-		if input, _ := f.GetString(name); input != "" {
-			inputs["--"+name] = input
+		input, _ := f.GetString(name)
+		if input == "" {
+			continue
+		}
+		for _, suffix := range append([]string{""}, reportInputSuffixes[name]...) {
+			inputs["--"+name+" or its files"] = append(inputs["--"+name+" or its files"], input+suffix)
 		}
 	}
 	return checkReportFile(output, inputs)
 }
 
 // checkReportFile is validateReportFile for any command: inputs maps a
-// description used in errors to a file the report must never replace. The
+// description used in errors to files the report must never replace. The
 // config in use is always protected, so load it before calling this.
-func checkReportFile(output string, inputs map[string]string) error {
+func checkReportFile(output string, inputs map[string][]string) error {
 	if output == "" {
 		return nil
 	}
-	for name, input := range inputs {
-		if samePath(output, input) {
-			return fmt.Errorf("--report-file must not overwrite %s", name)
+	for name, paths := range inputs {
+		for _, input := range paths {
+			if samePath(output, input) {
+				return fmt.Errorf("--report-file must not overwrite %s", name)
+			}
 		}
 	}
 	// The config in use may come from a default location rather than --config.

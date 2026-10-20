@@ -130,7 +130,7 @@ func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	reportFile, _ := f.GetString("report-file")
-	if err := checkReportFile(reportFile, map[string]string{"the upload report": reportPath}); err != nil {
+	if err := checkReportFile(reportFile, map[string][]string{"the upload report": {reportPath}}); err != nil {
 		return err
 	}
 
