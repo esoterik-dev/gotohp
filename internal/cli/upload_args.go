@@ -46,7 +46,7 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("upload-incomplete-live-photos", false, "upload an unmatched Live Photo member as a single file")
 	f.Bool("update-existing-photos-to-live", false, "attach matching MOV files to existing photos")
 	f.Bool("ignore-apple-metadata", false, "match Live Photo pairs by filename stem instead of Apple metadata")
-	f.StringP("log-level", "l", "info", "log level: debug, info, warn, error")
+	f.StringP("log-level", "l", "info", "stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error; info logs each uploaded file")
 	f.Bool("no-tui", false, "disable the interactive progress UI")
 	f.String("state-file", "", "read confirmed upload state from PATH")
 	f.Bool("update-state", false, "checkpoint confirmed uploads to --state-file")
@@ -183,6 +183,10 @@ func requestPolicyFromFlags(f *pflag.FlagSet) (*core.RequestPolicy, error) {
 // pairing enabled.
 func validateUploadOptions(f *pflag.FlagSet, opts core.UploadOptions) error {
 	if err := validateReportFile(f); err != nil {
+		return err
+	}
+	level, _ := f.GetString("log-level")
+	if _, err := parseLogLevel(level); err != nil {
 		return err
 	}
 	if (opts.UpdateState || opts.RevalidateState) && opts.StateFile == "" {
