@@ -97,7 +97,11 @@ func TestLaggingStillPreventsADuplicateLivePhoto(t *testing.T) {
 		}
 		return "", nil
 	}}
-	_, skipped, err := uploadLivePhotoWithCallback(context.Background(), api, pair, LivePhotoUploadOptions{}, 0, NopReporter{})
+	prepared := prepareUpload(context.Background(), UploadWorkItem{Kind: UploadWorkLivePhoto, LivePhoto: &pair}, UploadOptions{}, 0, NopReporter{})
+	if prepared.err != nil {
+		t.Fatal(prepared.err)
+	}
+	_, skipped, err := uploadLivePhotoWithCallback(context.Background(), api, pair, prepared.files[0], prepared.files[1], LivePhotoUploadOptions{}, 0, NopReporter{})
 	if err != nil || !skipped {
 		t.Fatalf("skipped=%v err=%v", skipped, err)
 	}

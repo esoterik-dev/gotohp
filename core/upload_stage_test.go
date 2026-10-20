@@ -33,9 +33,6 @@ func TestStageFilesLocallyCopiesAndCleans(t *testing.T) {
 	if err != nil || string(got) != "stable upload contents" {
 		t.Fatalf("staged contents = %q, %v", got, err)
 	}
-	if err := staged.verifySourcesUnchanged(); err != nil {
-		t.Fatalf("unchanged source rejected: %v", err)
-	}
 
 	staged.cleanup()
 	if _, err := os.Stat(staged.paths[0]); !os.IsNotExist(err) {
@@ -47,11 +44,15 @@ func TestStagedSourceChangedAfterStagingIsNotDeleted(t *testing.T) {
 	t.Parallel()
 
 	sourcePath := writeStageSource(t, "original")
-	staged, err := stageFilesLocally(context.Background(), []string{sourcePath})
-	if err != nil {
-		t.Fatal(err)
+	item := UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: sourcePath}}
+	prepared := prepareUpload(context.Background(), item, UploadOptions{StageLocal: true}, 0, NopReporter{})
+	if prepared.err != nil {
+		t.Fatal(prepared.err)
 	}
-	defer staged.cleanup()
+	defer prepared.cleanup()
+	if prepared.files[0].upload == sourcePath {
+		t.Fatal("StageLocal did not upload from a copy")
+	}
 
 	// Same size, new modification time: a rewrite the size check alone misses.
 	if err := os.WriteFile(sourcePath, []byte("replaced"), 0o600); err != nil {
@@ -61,15 +62,20 @@ func TestStagedSourceChangedAfterStagingIsNotDeleted(t *testing.T) {
 	if err := os.Chtimes(sourcePath, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeUploadedSource(sourcePath, staged); err == nil {
+	if err := removeUploadedSource(prepared.files[0]); err == nil {
 		t.Fatal("deleted a source that changed after staging")
 	}
 	if data, err := os.ReadFile(sourcePath); err != nil || string(data) != "replaced" {
 		t.Fatalf("changed source lost: %q %v", data, err)
 	}
 	pair := LivePhotoPair{PhotoPath: sourcePath, VideoPath: sourcePath + ".mov"}
-	if err := removeLivePhotoSources(pair, staged); err == nil {
+	if err := removeLivePhotoSources(pair, prepared.files[0]); err == nil {
 		t.Fatal("deleted a Live Photo whose source changed after staging")
+	}
+
+	prepared.cleanup()
+	if _, err := os.Stat(prepared.files[0].upload); !os.IsNotExist(err) {
+		t.Fatalf("staged copy survived cleanup: %v", err)
 	}
 }
 
@@ -77,7 +83,12 @@ func TestRemoveUploadedSourceWithoutStaging(t *testing.T) {
 	t.Parallel()
 
 	sourcePath := writeStageSource(t, "photo")
-	if err := removeUploadedSource(sourcePath, nil); err != nil {
+	item := UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: sourcePath}}
+	prepared := prepareUpload(context.Background(), item, UploadOptions{}, 0, NopReporter{})
+	if prepared.err != nil {
+		t.Fatal(prepared.err)
+	}
+	if err := removeUploadedSource(prepared.files[0]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {

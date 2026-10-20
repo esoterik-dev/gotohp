@@ -31,7 +31,9 @@ func newUploadCommand() *cobra.Command {
 	f.Bool("use-quota", false, "count uploads against the account's storage quota")
 	f.Bool("saver", false, "upload in storage saver quality")
 	f.BoolP("recursive", "r", false, "include subdirectories")
-	f.IntP("threads", "t", core.DefaultPreferences.UploadThreads, "number of upload threads")
+	f.IntP("threads", "t", core.DefaultPreferences.UploadThreads, "workers; each hashes, checks and uploads its own files (see --hash-threads)")
+	f.Int("hash-threads", 0, "split the work: workers that hash, stage and check for duplicates (default: --threads)")
+	f.Int("upload-threads", 0, "split the work: workers that transfer and commit new files (default: --threads)")
 	addRequestPolicyFlags(f)
 	f.BoolP("force", "f", false, "upload even if the file already exists in the library")
 	f.BoolP("delete", "d", false, "delete from host after upload")
@@ -140,6 +142,8 @@ func uploadOptionsFromFlags(f *pflag.FlagSet) core.UploadOptions {
 	opts.UpdateExistingPhotosToLive = getBool("update-existing-photos-to-live")
 	opts.IgnoreAppleMetadata = getBool("ignore-apple-metadata")
 	opts.Threads, _ = f.GetInt("threads")
+	opts.HashThreads, _ = f.GetInt("hash-threads")
+	opts.UploadThreads, _ = f.GetInt("upload-threads")
 	opts.ExcludePattern, _ = f.GetString("exclude")
 
 	album, _ := f.GetString("album")
@@ -174,6 +178,11 @@ func requestPolicyFromFlags(f *pflag.FlagSet) (*core.RequestPolicy, error) {
 func validateUploadOptions(f *pflag.FlagSet, opts core.UploadOptions) error {
 	if err := validateReportFile(f); err != nil {
 		return err
+	}
+	for _, name := range []string{"hash-threads", "upload-threads"} {
+		if n, _ := f.GetInt(name); f.Changed(name) && n < 1 {
+			return fmt.Errorf("--%s must be positive", name)
+		}
 	}
 	if opts.PairLivePhotos {
 		return nil

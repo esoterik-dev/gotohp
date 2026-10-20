@@ -37,6 +37,8 @@ type UploadManager struct {
 	logger   *slog.Logger
 	// apiOptions is captured from the options of the run in progress.
 	apiOptions ApiOptions
+	// newAPI creates the clients an upload run uses; tests swap in a fake.
+	newAPI func(ApiOptions) (uploadAPI, error)
 }
 
 // NewUploadManager creates a manager that reports progress to reporter. A nil
@@ -51,6 +53,7 @@ func NewUploadManager(reporter UploadReporter, logger *slog.Logger) *UploadManag
 	return &UploadManager{
 		reporter: reporter,
 		logger:   logger,
+		newAPI:   newUploadAPI,
 	}
 }
 
@@ -146,7 +149,7 @@ type FileUploadResult struct {
 
 type ThreadStatus struct {
 	WorkerID      int    `json:"WorkerID"`
-	Status        string `json:"Status"` // "idle", "hashing", "checking", "uploading", "finalizing", "completed", "skipped", "error"
+	Status        string `json:"Status"` // "idle", "staging", "hashing", "checking", "queued", "uploading", "finalizing", "completed", "skipped", "error"
 	FilePath      string `json:"FilePath"`
 	FileName      string `json:"FileName"`
 	Message       string `json:"Message"`
@@ -207,7 +210,8 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		return
 	}
 
-	if _, err := NewApi(opts.Api); err != nil {
+	checkApi, err := m.newAPI(opts.Api)
+	if err != nil {
 		for _, item := range workItems {
 			path := uploadWorkPrimaryPath(item)
 			m.reporter.FileResult(FileUploadResult{
@@ -236,34 +240,63 @@ func (m *UploadManager) Upload(paths []string, opts UploadOptions) {
 		m.reporter.TotalBytes(totalBytes)
 	}()
 
-	// Don't start more threads than files to process
-	numWorkers := min(opts.Threads, len(workItems))
+	// Hash workers prepare items ahead of the network workers. Canceling the
+	// run cancels hashing; already prepared items still get a result.
+	prepareCtx, cancelPrepare := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-m.getCancelChan():
+			cancelPrepare()
+		case <-prepareCtx.Done():
+		}
+	}()
+	// Don't start more network workers than items to process
+	numWorkers := min(opts.UploadThreads, len(workItems))
+	results := make(chan FileUploadResult, numWorkers)
 
-	// Create a worker pool for concurrent uploads
-	workChan := make(chan UploadWorkItem, len(workItems))
-	results := make(chan FileUploadResult, len(workItems))
+	// Hash workers also check for duplicates and finish items already in the
+	// library, so only real uploads wait for a network worker. They finish
+	// before workChan closes, so before the network workers and results do.
+	// Hash workers share checkApi for duplicate checks, which do not change
+	// it. *Api is not safe for concurrent uploads, so in one pool, where hash
+	// workers also upload, each creates its own client like an upload worker.
+	finishAPI := func(int) (uploadAPI, error) { return checkApi, nil }
+	if opts.UploadThreads == 0 {
+		// Hash worker IDs are 0..HashThreads-1 here, and each worker only
+		// touches its own entry.
+		clients := make([]uploadAPI, opts.HashThreads)
+		clientErrs := make([]error, opts.HashThreads)
+		finishAPI = func(workerID int) (uploadAPI, error) {
+			if clients[workerID] == nil && clientErrs[workerID] == nil {
+				clients[workerID], clientErrs[workerID] = m.newAPI(opts.Api)
+			}
+			return clients[workerID], clientErrs[workerID]
+		}
+	}
+	workChan := prepareUploads(prepareCtx, m.getStopChan(), workItems, opts, checkApi, m.reporter, func(workerID int, p preparedUpload) {
+		api, apiErr := finishAPI(workerID)
+		m.finishPrepared(workerID, api, apiErr, p, results, opts)
+	})
 
 	// Start workers
 	for i := range numWorkers {
 		m.wg.Add(1)
 		go m.runWorker(i, workChan, results, opts)
 	}
-
-	// Send work to workers
-	go func() {
-	LOOP:
-		for _, item := range workItems {
-			select {
-			case <-m.stop:
-				break LOOP
-			case workChan <- item:
+	if numWorkers == 0 {
+		// One pool: hash workers finish every item themselves. workChan
+		// closes once they are done, and results must stay open until then.
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			for range workChan {
 			}
-		}
-		close(workChan)
-	}()
+		}()
+	}
 
 	// Handle results, wait for completion, and create album if configured
 	go func() {
+		defer cancelPrepare()
 		// Collect successful uploads with path -> mediaKey mapping for AUTO mode
 		successfulUploads := make(map[string]string) // path -> mediaKey
 
@@ -584,76 +617,44 @@ func UploadFile(ctx context.Context, api *Api, filePath string, opts UploadOptio
 	if reporter == nil {
 		reporter = NopReporter{}
 	}
-	mediaKey, _, err := uploadSingleFile(ctx, api, filePath, opts, workerID, reporter)
+	prepared := prepareUpload(ctx, UploadWorkItem{Kind: UploadWorkSingle, Single: &SingleMedia{Path: filePath}}, opts, workerID, reporter)
+	defer prepared.cleanup()
+	if prepared.err != nil {
+		return "", fmt.Errorf("error preparing file: %w", prepared.err)
+	}
+	mediaKey, _, err := uploadSingleFile(ctx, api, prepared.files[0], opts, workerID, reporter)
 	return mediaKey, err
 }
 
-// uploadSingleFile uploads one file. The bool is true when the file already
-// exists remotely; the returned media key is then the existing item's key.
-func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+// uploadSingleFile uploads one file that a hash worker has prepared. The bool
+// is true when the file already exists remotely; the returned media key is
+// then the existing item's key.
+func uploadSingleFile(ctx context.Context, api uploadAPI, file preparedFile, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+	filePath := file.source
 	fileName := filepath.Base(filePath)
 	mediakey := ""
+	if err := file.uploadable(); err != nil {
+		return "", false, err
+	}
 
 	// Determine the timestamp to use for the upload.
 	// Default to file mtime, but allow filename-based timestamp to take precedence if enabled.
-	var uploadTimestamp int64
-	if info, err := os.Stat(filePath); err == nil {
-		uploadTimestamp = info.ModTime().Unix()
-	}
+	uploadTimestamp := file.info.ModTime().Unix()
 	if opts.SetDateFromFilename {
 		if t, ok := parseTimestampFromFilename(filePath); ok {
 			uploadTimestamp = t.Unix()
 		}
 	}
+	sha1_hash_bytes := file.hash
 
-	uploadPath := filePath
-	var staged *stagedFiles
-	if opts.StageLocal {
-		reporter.ThreadStatus(ThreadStatus{
-			WorkerID: workerID,
-			Status:   "staging",
-			FilePath: filePath,
-			FileName: fileName,
-			Message:  "Copying to local temporary storage...",
-		})
-		var err error
-		staged, err = stageFilesLocally(ctx, []string{filePath})
-		if err != nil {
-			return "", false, fmt.Errorf("stage file locally: %w", err)
-		}
-		defer staged.cleanup()
-		uploadPath = staged.paths[0]
-	}
-
-	// Stage 1: Hashing
-	reporter.ThreadStatus(ThreadStatus{
-		WorkerID: workerID,
-		Status:   "hashing",
-		FilePath: filePath,
-		FileName: fileName,
-		Message:  "Hashing...",
-	})
-
-	sha1_hash_bytes, err := CalculateSHA1(ctx, uploadPath)
-	if err != nil {
-		return "", false, fmt.Errorf("error calculating hash file: %w", err)
-	}
-
-	// Stage 2: Checking if exists in library
+	// Stage 2: Checking if exists in library (usually done by the hash worker)
 	if !opts.ForceUpload {
-		reporter.ThreadStatus(ThreadStatus{
-			WorkerID: workerID,
-			Status:   "checking",
-			FilePath: filePath,
-			FileName: fileName,
-			Message:  "Checking if file exists in library...",
-		})
-
-		mediakey, err = api.FindRemoteMediaByHash(ctx, sha1_hash_bytes)
-		if err != nil {
-			// Uploading without a completed duplicate check risks a duplicate item.
-			return "", false, fmt.Errorf("remote duplicate check failed; upload deferred: %w", err)
+		if !file.checked {
+			if err := checkRemoteDuplicate(ctx, api, &file, workerID, reporter); err != nil {
+				return "", false, err
+			}
 		}
+		mediakey = file.remoteKey
 		if len(mediakey) > 0 {
 			reporter.ThreadStatus(ThreadStatus{
 				WorkerID: workerID,
@@ -663,7 +664,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 				Message:  "Already in library",
 			})
 			if opts.DeleteFromHost {
-				if err := removeUploadedSource(filePath, staged); err != nil {
+				if err := removeUploadedSource(file); err != nil {
 					return mediakey, true, fmt.Errorf("file exists in library but failed to delete local copy: %w", err)
 				}
 			}
@@ -671,13 +672,8 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		}
 	}
 
-	fileInfo, err := os.Stat(uploadPath)
-	if err != nil {
-		return "", false, fmt.Errorf("error getting file info: %w", err)
-	}
-
 	// Stage 3: Uploading
-	fileSize := fileInfo.Size()
+	fileSize := file.info.Size()
 	reporter.ThreadStatus(ThreadStatus{
 		WorkerID:      workerID,
 		Status:        "uploading",
@@ -706,7 +702,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 		})
 	}
 
-	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, uploadPath, sha1_hash_bytes, fileSize, progressCallback)
+	finalizeToken, err := api.UploadFileWithHashAndProgress(ctx, file.upload, sha1_hash_bytes, fileSize, progressCallback)
 	if err != nil {
 		return "", false, fmt.Errorf("error uploading file: %w", err)
 	}
@@ -734,7 +730,7 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 	}
 
 	if opts.DeleteFromHost {
-		if err := removeUploadedSource(filePath, staged); err != nil {
+		if err := removeUploadedSource(file); err != nil {
 			return mediaKey, false, fmt.Errorf("uploaded successfully but failed to delete file: %w", err)
 		}
 	}
@@ -743,18 +739,16 @@ func uploadSingleFile(ctx context.Context, api *Api, filePath string, opts Uploa
 }
 
 // removeUploadedSource deletes an uploaded file, refusing if it changed after
-// it was staged.
-func removeUploadedSource(path string, staged *stagedFiles) error {
-	if err := staged.verifySourcesUnchanged(); err != nil {
-		return err
+// it was hashed or staged.
+func removeUploadedSource(file preparedFile) error {
+	if err := file.unchanged(); err != nil {
+		return fmt.Errorf("refusing to delete: %w", err)
 	}
-	return os.Remove(path)
+	return os.Remove(file.source)
 }
 
-func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, results chan<- FileUploadResult, opts UploadOptions) {
+func (m *UploadManager) runWorker(workerID int, workChan <-chan preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
 	defer m.wg.Done()
-	cancel := m.getCancelChan()
-	stop := m.getStopChan()
 
 	// Emit idle status initially
 	m.reporter.ThreadStatus(ThreadStatus{
@@ -764,100 +758,27 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 	})
 
 	// Create API client once per worker for connection reuse
-	api, err := NewApi(opts.Api)
-	if err != nil {
-		m.reporter.ThreadStatus(ThreadStatus{
-			WorkerID: workerID,
-			Status:   "error",
-			Message:  fmt.Sprintf("Failed to initialize API: %v", err),
-		})
-		return
-	}
+	api, apiErr := m.newAPI(opts.Api)
 
-	for item := range workChan {
+	// Drain the queue even after Stop or Cancel so every prepared item is
+	// cleaned up. Items still waiting for an upload worker then were never
+	// uploaded: they are dropped without a result, like files never started.
+	stop := m.getStopChan()
+	for prepared := range workChan {
 		select {
 		case <-stop:
-			m.reporter.ThreadStatus(ThreadStatus{
-				WorkerID: workerID,
-				Status:   "idle",
-				Message:  "Cancelled",
-			})
-			return // Stop if cancellation is requested
+			prepared.cleanup()
+			continue
 		default:
-			ctx, cancelUpload := context.WithCancel(context.Background())
-			go func() {
-				select {
-				case <-cancel:
-					cancelUpload()
-				case <-ctx.Done():
-					// Upload completed or context cancelled
-				}
-			}()
-
-			path := uploadWorkPrimaryPath(item)
-			paths := uploadWorkPaths(item)
-			isLivePhoto := item.Kind == UploadWorkLivePhoto
-			mediaKey, skipped, err := uploadWorkItem(ctx, api, item, opts, workerID, m.reporter)
-			skipCode, skipReason := remoteSkip(isLivePhoto)
-			if err != nil && mediaKey != "" {
-				// The item is in the library; only deleting the local copy failed.
-				result := FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
-				message := fmt.Sprintf("Uploaded, but local cleanup failed: %v", err)
-				if skipped {
-					result.Skipped, result.SkipCode, result.SkipReason = true, skipCode, skipReason
-					message = fmt.Sprintf("Already in library, but local cleanup failed: %v", err)
-				}
-				results <- result
-				m.reporter.Warning(PreflightWarning{
-					Paths:   paths,
-					Code:    "local-cleanup-failed",
-					Message: err.Error(),
-				})
-				m.reporter.ThreadStatus(ThreadStatus{
-					WorkerID: workerID,
-					Status:   "completed",
-					FilePath: path,
-					FileName: filepath.Base(path),
-					Message:  message,
-				})
-			} else if err != nil {
-				results <- FileUploadResult{IsError: true, IsLivePhoto: isLivePhoto, Error: err, ErrorMessage: err.Error(), Path: path, Paths: paths}
-				m.reporter.ThreadStatus(ThreadStatus{
-					WorkerID: workerID,
-					Status:   "error",
-					FilePath: path,
-					FileName: filepath.Base(path),
-					Message:  fmt.Sprintf("Error: %v", err),
-				})
-			} else if skipped {
-				results <- FileUploadResult{
-					IsLivePhoto: isLivePhoto,
-					Skipped:     true,
-					MediaKey:    mediaKey,
-					SkipCode:    skipCode,
-					SkipReason:  skipReason,
-					Path:        path,
-					Paths:       paths,
-				}
-			} else {
-				results <- FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
-				m.reporter.ThreadStatus(ThreadStatus{
-					WorkerID: workerID,
-					Status:   "completed",
-					FilePath: path,
-					FileName: filepath.Base(path),
-					Message:  "Completed",
-				})
-			}
-			cancelUpload()
-
-			// Mark as idle after completing file
-			m.reporter.ThreadStatus(ThreadStatus{
-				WorkerID: workerID,
-				Status:   "idle",
-				Message:  "Waiting for next file...",
-			})
 		}
+		m.finishPrepared(workerID, api, apiErr, prepared, results, opts)
+
+		// Mark as idle after completing file
+		m.reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "idle",
+			Message:  "Waiting for next file...",
+		})
 	}
 
 	// Final idle status when no more work
@@ -868,6 +789,100 @@ func (m *UploadManager) runWorker(workerID int, workChan <-chan UploadWorkItem, 
 	})
 }
 
+// finishPrepared uploads one prepared item, or reports it when preparation
+// failed or found it in the library, and sends its result. apiErr is the
+// error from creating api, if any.
+func (m *UploadManager) finishPrepared(workerID int, api uploadAPI, apiErr error, prepared preparedUpload, results chan<- FileUploadResult, opts UploadOptions) {
+	cancel := m.getCancelChan()
+	item := prepared.item
+	failure := prepared.err
+	if failure == nil {
+		failure = apiErr
+	}
+	// An item already found in the library needs no request, so a cancel
+	// does not turn its known result into a failure.
+	known := failure == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
+	select {
+	case <-cancel:
+		if !known {
+			failure = context.Canceled
+		}
+	default:
+	}
+	if failure != nil {
+		results <- FileUploadResult{IsError: true, IsLivePhoto: item.Kind == UploadWorkLivePhoto, Error: failure, ErrorMessage: failure.Error(), Path: uploadWorkPrimaryPath(item), Paths: uploadWorkPaths(item)}
+		prepared.cleanup()
+		return
+	}
+	ctx, cancelUpload := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-cancel:
+			cancelUpload()
+		case <-ctx.Done():
+			// Upload completed or context cancelled
+		}
+	}()
+
+	path := uploadWorkPrimaryPath(item)
+	paths := uploadWorkPaths(item)
+	isLivePhoto := item.Kind == UploadWorkLivePhoto
+	mediaKey, skipped, err := uploadWorkItem(ctx, api, prepared, opts, workerID, m.reporter)
+	skipCode, skipReason := remoteSkip(isLivePhoto)
+	if err != nil && mediaKey != "" {
+		// The item is in the library; only deleting the local copy failed.
+		result := FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
+		message := fmt.Sprintf("Uploaded, but local cleanup failed: %v", err)
+		if skipped {
+			result.Skipped, result.SkipCode, result.SkipReason = true, skipCode, skipReason
+			message = fmt.Sprintf("Already in library, but local cleanup failed: %v", err)
+		}
+		results <- result
+		m.reporter.Warning(PreflightWarning{
+			Paths:   paths,
+			Code:    "local-cleanup-failed",
+			Message: err.Error(),
+		})
+		m.reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "completed",
+			FilePath: path,
+			FileName: filepath.Base(path),
+			Message:  message,
+		})
+	} else if err != nil {
+		results <- FileUploadResult{IsError: true, IsLivePhoto: isLivePhoto, Error: err, ErrorMessage: err.Error(), Path: path, Paths: paths}
+		m.reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "error",
+			FilePath: path,
+			FileName: filepath.Base(path),
+			Message:  fmt.Sprintf("Error: %v", err),
+		})
+	} else if skipped {
+		results <- FileUploadResult{
+			IsLivePhoto: isLivePhoto,
+			Skipped:     true,
+			MediaKey:    mediaKey,
+			SkipCode:    skipCode,
+			SkipReason:  skipReason,
+			Path:        path,
+			Paths:       paths,
+		}
+	} else {
+		results <- FileUploadResult{IsLivePhoto: isLivePhoto, Path: path, Paths: paths, MediaKey: mediaKey}
+		m.reporter.ThreadStatus(ThreadStatus{
+			WorkerID: workerID,
+			Status:   "completed",
+			FilePath: path,
+			FileName: filepath.Base(path),
+			Message:  "Completed",
+		})
+	}
+	cancelUpload()
+	prepared.cleanup()
+}
+
 // remoteSkip describes an item skipped because it is already in the library.
 func remoteSkip(isLivePhoto bool) (code, reason string) {
 	if isLivePhoto {
@@ -876,22 +891,22 @@ func remoteSkip(isLivePhoto bool) (code, reason string) {
 	return "remote-duplicate", "Skipped because this file already exists remotely"
 }
 
-func uploadWorkItem(ctx context.Context, api *Api, item UploadWorkItem, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+func uploadWorkItem(ctx context.Context, api uploadAPI, prepared preparedUpload, opts UploadOptions, workerID int, reporter UploadReporter) (string, bool, error) {
+	item := prepared.item
 	switch item.Kind {
 	case UploadWorkSingle:
-		if item.Single == nil || item.LivePhoto != nil {
+		if item.Single == nil || item.LivePhoto != nil || len(prepared.files) != 1 {
 			return "", false, fmt.Errorf("invalid single-media work item")
 		}
-		return uploadSingleFile(ctx, api, item.Single.Path, opts, workerID, reporter)
+		return uploadSingleFile(ctx, api, prepared.files[0], opts, workerID, reporter)
 	case UploadWorkLivePhoto:
-		if item.LivePhoto == nil || item.Single != nil {
+		if item.LivePhoto == nil || item.Single != nil || len(prepared.files) != 2 {
 			return "", false, fmt.Errorf("invalid Live Photo work item")
 		}
-		return uploadLivePhotoWithCallback(ctx, api, *item.LivePhoto, LivePhotoUploadOptions{
-			Policy:                     buildLivePhotoCommitPolicy(api),
+		return uploadLivePhotoWithCallback(ctx, api, *item.LivePhoto, prepared.files[0], prepared.files[1], LivePhotoUploadOptions{
+			Policy:                     api.livePhotoCommitPolicy(),
 			DeleteFromHost:             opts.DeleteFromHost,
 			SetDateFromFilename:        opts.SetDateFromFilename,
-			StageLocal:                 opts.StageLocal,
 			UpdateExistingPhotosToLive: opts.UpdateExistingPhotosToLive,
 		}, workerID, reporter)
 	default:

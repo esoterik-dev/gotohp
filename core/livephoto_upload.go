@@ -19,64 +19,32 @@ type LivePhotoUploadOptions struct {
 	Policy                     LivePhotoCommitPolicy
 	DeleteFromHost             bool
 	SetDateFromFilename        bool
-	StageLocal                 bool
 	UpdateExistingPhotosToLive bool
 }
 
+// uploadLivePhotoWithCallback uploads a pair whose files a hash worker has
+// already prepared: photo and video carry the hashes and the files to read.
 func uploadLivePhotoWithCallback(
 	ctx context.Context,
 	api livePhotoUploadAPI,
 	pair LivePhotoPair,
+	photo, video preparedFile,
 	options LivePhotoUploadOptions,
 	workerID int,
 	reporter UploadReporter,
 ) (mediaKey string, skipped bool, err error) {
-	photoInfo, err := os.Stat(pair.PhotoPath)
-	if err != nil {
-		return "", false, fmt.Errorf("stat Live Photo still: %w", err)
-	}
-	videoInfo, err := os.Stat(pair.VideoPath)
-	if err != nil {
-		return "", false, fmt.Errorf("stat Live Photo video: %w", err)
-	}
-	displayName := filepath.Base(pair.PhotoPath) + " + " + filepath.Base(pair.VideoPath)
-	// uploadPair is what gets hashed and uploaded; pair stays the source for
-	// names, dates and deletion.
-	uploadPair := pair
-	var staged *stagedFiles
-	if options.StageLocal {
-		reporter.ThreadStatus(ThreadStatus{
-			WorkerID: workerID,
-			Status:   "staging",
-			FilePath: pair.PhotoPath,
-			FileName: displayName,
-			Message:  "Copying Live Photo pair to local temporary storage...",
-		})
-		staged, err = stageFilesLocally(ctx, []string{pair.PhotoPath, pair.VideoPath})
-		if err != nil {
-			return "", false, fmt.Errorf("stage Live Photo pair locally: %w", err)
+	for _, file := range []preparedFile{photo, video} {
+		if err := file.uploadable(); err != nil {
+			return "", false, err
 		}
-		defer staged.cleanup()
-		uploadPair = LivePhotoPair{PhotoPath: staged.paths[0], VideoPath: staged.paths[1]}
-		photoInfo, videoInfo = staged.infos[0], staged.infos[1]
 	}
+	photoInfo, videoInfo := photo.info, video.info
+	photoSHA1, videoSHA1 := photo.hash, video.hash
+	displayName := filepath.Base(pair.PhotoPath) + " + " + filepath.Base(pair.VideoPath)
+	// uploadPair is what gets uploaded; pair stays the source for names,
+	// dates and deletion.
+	uploadPair := LivePhotoPair{PhotoPath: photo.upload, VideoPath: video.upload}
 	totalBytes := photoInfo.Size() + videoInfo.Size()
-	reporter.ThreadStatus(ThreadStatus{
-		WorkerID: workerID,
-		Status:   "hashing",
-		FilePath: pair.PhotoPath,
-		FileName: displayName,
-		Message:  "Hashing Live Photo pair...",
-	})
-
-	photoSHA1, err := CalculateSHA1(ctx, uploadPair.PhotoPath)
-	if err != nil {
-		return "", false, fmt.Errorf("hash Live Photo still: %w", err)
-	}
-	videoSHA1, err := CalculateSHA1(ctx, uploadPair.VideoPath)
-	if err != nil {
-		return "", false, fmt.Errorf("hash Live Photo video: %w", err)
-	}
 
 	reporter.ThreadStatus(ThreadStatus{
 		WorkerID: workerID,
@@ -105,7 +73,7 @@ func uploadLivePhotoWithCallback(
 				api,
 				uploadPair,
 				pair,
-				staged,
+				[]preparedFile{photo, video},
 				photoInfo,
 				videoInfo,
 				photoSHA1,
@@ -183,7 +151,7 @@ func uploadLivePhotoWithCallback(
 	}
 
 	if options.DeleteFromHost {
-		if err := removeLivePhotoSources(pair, staged); err != nil {
+		if err := removeLivePhotoSources(pair, photo, video); err != nil {
 			return mediaKey, false, err
 		}
 	}
@@ -234,7 +202,7 @@ func reconcileExistingLivePhoto(
 	api livePhotoUploadAPI,
 	uploadPair LivePhotoPair,
 	pair LivePhotoPair,
-	staged *stagedFiles,
+	prepared []preparedFile,
 	photoInfo os.FileInfo,
 	videoInfo os.FileInfo,
 	photoSHA1 []byte,
@@ -299,7 +267,7 @@ func reconcileExistingLivePhoto(
 		return "", fmt.Errorf("updated Live Photo media key not received")
 	}
 	if options.DeleteFromHost {
-		if err := removeLivePhotoSources(pair, staged); err != nil {
+		if err := removeLivePhotoSources(pair, prepared...); err != nil {
 			return mediaKey, err
 		}
 	}
@@ -339,10 +307,12 @@ func uploadLivePhotoComponent(
 }
 
 // removeLivePhotoSources deletes an uploaded pair, refusing if either source
-// changed after it was staged.
-func removeLivePhotoSources(pair LivePhotoPair, staged *stagedFiles) error {
-	if err := staged.verifySourcesUnchanged(); err != nil {
-		return err
+// changed after it was hashed or staged.
+func removeLivePhotoSources(pair LivePhotoPair, prepared ...preparedFile) error {
+	for _, file := range prepared {
+		if err := file.unchanged(); err != nil {
+			return fmt.Errorf("refusing to delete: %w", err)
+		}
 	}
 	return removeLivePhotoFiles(pair)
 }

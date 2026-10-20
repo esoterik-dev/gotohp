@@ -370,7 +370,7 @@ export class ThreadStatus {
     "WorkerID": number;
 
     /**
-     * "idle", "hashing", "checking", "uploading", "finalizing", "completed", "skipped", "error"
+     * "idle", "staging", "hashing", "checking", "queued", "uploading", "finalizing", "completed", "skipped", "error"
      */
     "Status": string;
     "FilePath": string;
