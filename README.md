@@ -34,7 +34,7 @@ The CLI shares the config file with the GUI, but reads only the stored credentia
 
 `--report-file <path>` writes the final JSON summary to a file while keeping the interactive progress UI visible when the command is run in a terminal.
 
-The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files finish, then writes the report and exits with status 130 (143 for SIGTERM). Albums are still created for the files that finished. A second Ctrl+C aborts in-progress files and quits at once, keeping the results that already arrived.
+The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files finish, then writes the report and exits with status 130 (143 for SIGTERM). Albums are still created for the files that finished. A second Ctrl+C aborts in-progress files and quits at once, keeping the results that already arrived. It creates no album, so files that finished are not added to `--album`; the report says so.
 
 Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
 

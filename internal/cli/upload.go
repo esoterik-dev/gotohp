@@ -101,6 +101,7 @@ type uploadModel struct {
 	stop         func()       // finish in-flight files, start no new ones
 	cancel       func()       // abort in-flight files
 	// Album state
+	requestedAlbum  string // --album, or "AUTO"; empty when no album was asked for
 	albumName       string
 	albumItemsAdded int
 	albumTotalItems int
@@ -256,6 +257,13 @@ func (m uploadModel) requestCancel(exitCode int) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		if m.cancel != nil {
 			m.cancel()
+		}
+		// An aborted run creates no album, so the uploaded files are not in it.
+		if m.requestedAlbum != "" && m.completed > 0 && !m.albumComplete && m.albumError == "" {
+			if m.albumName == "" {
+				m.albumName = m.requestedAlbum
+			}
+			m.albumError = "album not finished: the upload was aborted"
 		}
 		return m, tea.Quit
 	}
@@ -462,6 +470,10 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 			tea.WithInput(nil),
 			tea.WithoutRenderer(),
 		)
+	}
+	model.requestedAlbum = opts.AlbumName
+	if opts.AlbumAutoMode {
+		model.requestedAlbum = "AUTO"
 	}
 	var uploadManager *core.UploadManager
 	model.stop = func() { uploadManager.Stop() }

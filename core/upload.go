@@ -344,16 +344,9 @@ func isSkippedPreflightWarning(code string) bool {
 
 // handleAlbumCreation handles album creation based on config (manual name/key or AUTO mode)
 func (m *UploadManager) handleAlbumCreation(uploads map[string]string, albumName string, albumAutoMode bool) {
-	// An aborted run creates no albums; say so instead of silently skipping.
+	// Check if cancelled before starting album creation
 	if m.isCancelled() {
 		m.logger.Info("Upload cancelled, skipping album creation")
-		if albumName != "" || albumAutoMode {
-			name := albumName
-			if albumAutoMode {
-				name = "AUTO"
-			}
-			m.reporter.AlbumError(AlbumError{AlbumName: name, Error: "album creation skipped: the upload was aborted"})
-		}
 		return
 	}
 
