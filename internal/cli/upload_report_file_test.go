@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"app/core"
@@ -134,5 +135,61 @@ func TestReportFileDirectoryRejectedBeforeUpload(t *testing.T) {
 	}
 	if info, err := os.Stat(reportDir); err != nil || !info.IsDir() {
 		t.Fatalf("report directory was replaced: %v", err)
+	}
+}
+
+// --report-file is refused before any work when it would replace a photo or
+// video the run uploads; the photo is left untouched.
+func TestReportFileRefusesUploadMedia(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "gotohp.config")
+	writeFixture(t, config, "account: {}\n")
+	src := filepath.Join(dir, "src")
+	nested := filepath.Join(src, "sub", "IMG_2.HEIC")
+	writeFixture(t, nested, "photo")
+	single := filepath.Join(dir, "single.jpg")
+	writeFixture(t, single, "single photo")
+	for name, c := range map[string]struct {
+		paths  []string
+		report string
+	}{
+		"upload path":       {[]string{single}, single},
+		"photo in a folder": {[]string{src, "--recursive"}, nested},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before, _ := os.ReadFile(c.report)
+			args := append(append([]string{}, c.paths...), "--config", config, "--report-file", c.report)
+			code, stdout, stderr := runUploadCLI(t, args...)
+			if code != 1 || stdout != "" || !strings.Contains(stderr, "--report-file") {
+				t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+			}
+			if after, _ := os.ReadFile(c.report); string(after) != string(before) {
+				t.Fatalf("%s was overwritten: %q", c.report, after)
+			}
+		})
+	}
+}
+
+// A report or log kept inside the uploaded folder is not media, so a rerun
+// may replace it.
+func TestOutputFilesInUploadFolderMayBeReplaced(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "gotohp.config")
+	writeFixture(t, config, "account: {}\n")
+	src := filepath.Join(dir, "src")
+	writeFixture(t, filepath.Join(src, "photo.jpg"), "photo")
+	report := filepath.Join(src, "upload-report.json")
+	writeFixture(t, report, "old report")
+	logPath := filepath.Join(src, "upload.log")
+	writeFixture(t, logPath, "old log\n")
+	code, stdout, stderr := runUploadCLI(t, src, "--config", config, "--report-file", report, "--log-file", logPath)
+	if code != 1 || stdout == "" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if data, _ := os.ReadFile(report); !strings.Contains(string(data), `"results"`) {
+		t.Fatalf("report not replaced: %q", data)
+	}
+	if lines := readLog(t, logPath); !hasMsg(lines, "upload started") {
+		t.Fatalf("log not written: %v", lines)
 	}
 }

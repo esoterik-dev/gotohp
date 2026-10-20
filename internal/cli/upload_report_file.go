@@ -42,9 +42,8 @@ func protectedInputs(f *pflag.FlagSet) map[string][]string {
 }
 
 // validateLogFile rejects a --log-file that would overwrite an input file,
-// the report, an upload path or a file inside one, or that names a directory,
-// before any upload starts. Like --report-file, any other file may be
-// replaced.
+// the report, a photo or video to upload, or that names a directory, before
+// any upload starts. Like --report-file, any other file may be replaced.
 func validateLogFile(f *pflag.FlagSet, paths []string) error {
 	output, _ := f.GetString("log-file")
 	if output == "" {
@@ -54,16 +53,30 @@ func validateLogFile(f *pflag.FlagSet, paths []string) error {
 	if report, _ := f.GetString("report-file"); report != "" {
 		inputs["--report-file"] = []string{report}
 	}
-	inputs["an upload path"] = paths
 	if err := checkOutputFile("--log-file", output, inputs); err != nil {
 		return err
 	}
-	if _, err := os.Stat(output); err != nil {
-		return nil // a new file cannot be one of the files to upload
+	return checkMediaFiles("--log-file", output, paths)
+}
+
+// checkMediaFiles rejects an output that is one of paths, or an existing
+// photo or video inside one of them: the files a run reads and uploads.
+// Other files there, such as an earlier report or log, may be replaced.
+func checkMediaFiles(flag, output string, paths []string) error {
+	if output == "" {
+		return nil
+	}
+	for _, path := range paths {
+		if path != "" && samePath(output, path) {
+			return fmt.Errorf("%s must not overwrite %s, a file to upload or read", flag, path)
+		}
+	}
+	if _, err := os.Stat(output); err != nil || !core.IsSupportedByGooglePhotos(output) {
+		return nil
 	}
 	for _, path := range paths {
 		if info, err := os.Stat(path); err == nil && info.IsDir() && insideDir(output, path) {
-			return fmt.Errorf("--log-file must not overwrite a file in the upload path %s", path)
+			return fmt.Errorf("%s must not overwrite a photo or video in %s", flag, path)
 		}
 	}
 	return nil

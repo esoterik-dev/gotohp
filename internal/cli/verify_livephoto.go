@@ -177,6 +177,13 @@ func verifyLivePhotosCommand(cmd *cobra.Command, args []string, runLog *runLog) 
 	if len(pairs) == 0 {
 		return fmt.Errorf("no two-file Live Photo pairs found in %s", reportPath)
 	}
+	media := []string{sourceRoot}
+	for _, pair := range pairs {
+		media = append(media, pair.PhotoPath, pair.VideoPath)
+	}
+	if err := checkMediaFiles("--report-file", reportFile, media); err != nil {
+		return err
+	}
 	if limit > 0 && limit < len(pairs) {
 		pairs = pairs[:limit]
 	}

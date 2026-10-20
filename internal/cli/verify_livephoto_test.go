@@ -118,7 +118,7 @@ func runVerifyInDir(t *testing.T, args ...string) error {
 	t.Cleanup(func() { core.AppConfig, core.ConfigPath = previousConfig, previousPath })
 	core.ConfigPath = ""
 	t.Chdir(t.TempDir())
-	writeFiles(t, "IMG_1.HEIC", "IMG_1.MOV")
+	writeFiles(t, "IMG_1.HEIC", "IMG_1.MOV", "dcim/IMG_9.JPG")
 	for name, data := range map[string]string{
 		"gotohp.config": verifyTestConfig,
 		"other.config":  verifyTestConfig,
@@ -144,6 +144,9 @@ func TestVerificationReportFileRefusedBeforeWork(t *testing.T) {
 		"default config": {"--report-file", "gotohp.config"},
 		"--config":       {"--config", "other.config", "--report-file", "other.config"},
 		"directory":      {"--report-file", "out"},
+		"pair photo":     {"--report-file", "IMG_1.HEIC"},
+		"pair video":     {"--report-file", "IMG_1.MOV"},
+		"source root":    {"--source-root", "dcim", "--report-file", "dcim/IMG_9.JPG"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := runVerifyInDir(t, args...)
@@ -153,6 +156,11 @@ func TestVerificationReportFileRefusedBeforeWork(t *testing.T) {
 			for _, config := range []string{"gotohp.config", "other.config"} {
 				if data, _ := os.ReadFile(config); string(data) != verifyTestConfig {
 					t.Fatalf("%s was replaced: %s", config, data)
+				}
+			}
+			for _, media := range []string{"IMG_1.HEIC", "IMG_1.MOV", "dcim/IMG_9.JPG"} {
+				if data, _ := os.ReadFile(media); string(data) != media {
+					t.Fatalf("%s was replaced: %s", media, data)
 				}
 			}
 		})
