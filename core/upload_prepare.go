@@ -83,6 +83,18 @@ type preparedUpload struct {
 
 func (p preparedUpload) cleanup() { p.staged.cleanup() }
 
+// knownResult reports whether the duplicate checks already decided the item
+// is skipped, so it needs no upload and no further request.
+func (p preparedUpload) knownResult(opts UploadOptions) bool {
+	switch {
+	case p.item.Kind == UploadWorkSingle && len(p.files) == 1:
+		return p.files[0].remoteKey != ""
+	case p.item.Kind == UploadWorkLivePhoto && len(p.files) == 2:
+		return livePhotoSkipped(p.files[0], p.files[1], opts.UpdateExistingPhotosToLive)
+	}
+	return false
+}
+
 // prepareUpload stages (with StageLocal) and hashes every file of item.
 func prepareUpload(ctx context.Context, item UploadWorkItem, opts UploadOptions, workerID int, reporter UploadReporter) preparedUpload {
 	p := preparedUpload{item: item}
@@ -200,12 +212,17 @@ func prepareUploads(ctx context.Context, stop <-chan struct{}, items []UploadWor
 					continue
 				}
 				prepared := prepareUpload(ctx, item, opts, workerID, reporter)
-				if finder != nil && prepared.err == nil && item.Kind == UploadWorkSingle && !opts.ForceUpload {
-					prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)
+				if finder != nil && prepared.err == nil {
+					switch {
+					case item.Kind == UploadWorkSingle && !opts.ForceUpload:
+						prepared.err = checkRemoteDuplicate(ctx, finder, &prepared.files[0], workerID, reporter)
+					case item.Kind == UploadWorkLivePhoto:
+						prepared.err = checkLivePhotoPair(ctx, finder, *item.LivePhoto, &prepared.files[0], &prepared.files[1], workerID, reporter)
+					}
 				}
 				// Finish on the hash worker whatever needs no upload worker: a
 				// duplicate, a failure, or every item when there is one pool.
-				known := prepared.err == nil && item.Kind == UploadWorkSingle && prepared.files[0].remoteKey != ""
+				known := prepared.err == nil && prepared.knownResult(opts)
 				if known || prepared.err != nil || opts.UploadThreads == 0 {
 					finish(workerID, prepared)
 					reporter.ThreadStatus(ThreadStatus{WorkerID: workerID, Status: "idle", Message: "Waiting for next file..."})

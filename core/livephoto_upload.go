@@ -46,25 +46,13 @@ func uploadLivePhotoWithCallback(
 	uploadPair := LivePhotoPair{PhotoPath: photo.upload, VideoPath: video.upload}
 	totalBytes := photoInfo.Size() + videoInfo.Size()
 
-	reporter.ThreadStatus(ThreadStatus{
-		WorkerID: workerID,
-		Status:   "checking",
-		FilePath: pair.PhotoPath,
-		FileName: displayName,
-		Message:  "Checking both Live Photo components...",
-	})
-	photoRemoteKey, photoCheckErr := api.FindRemoteMediaByHash(ctx, photoSHA1)
-	videoRemoteKey, videoCheckErr := api.FindRemoteMediaByHash(ctx, videoSHA1)
-	if photoCheckErr != nil {
-		return "", false, fmt.Errorf("check Live Photo still deduplication: %w", photoCheckErr)
+	// Hash workers usually checked both components already.
+	if !photo.checked || !video.checked {
+		if err := checkLivePhotoPair(ctx, api, pair, &photo, &video, workerID, reporter); err != nil {
+			return "", false, err
+		}
 	}
-	if videoCheckErr != nil {
-		return "", false, fmt.Errorf("check Live Photo video deduplication: %w", videoCheckErr)
-	}
-	photoRemoteKey, videoRemoteKey, err = recheckNewLivePhotoPair(ctx, api, photoSHA1, videoSHA1, photoRemoteKey, videoRemoteKey)
-	if err != nil {
-		return "", false, fmt.Errorf("recheck Live Photo deduplication: %w", err)
-	}
+	photoRemoteKey, videoRemoteKey := photo.remoteKey, video.remoteKey
 	if photoRemoteKey != "" {
 		if options.UpdateExistingPhotosToLive {
 			reporter.TotalBytesDelta(-photoInfo.Size())
@@ -158,6 +146,47 @@ func uploadLivePhotoWithCallback(
 	return mediaKey, false, nil
 }
 
+// checkLivePhotoPair looks both components of pair up in the library,
+// rechecking a pair that looks new (see recheckNewLivePhotoPair), and
+// records the keys on photo and video.
+func checkLivePhotoPair(ctx context.Context, api remoteHashFinder, pair LivePhotoPair, photo, video *preparedFile, workerID int, reporter UploadReporter) error {
+	reporter.ThreadStatus(ThreadStatus{
+		WorkerID: workerID,
+		Status:   "checking",
+		FilePath: pair.PhotoPath,
+		FileName: filepath.Base(pair.PhotoPath) + " + " + filepath.Base(pair.VideoPath),
+		Message:  "Checking both Live Photo components...",
+	})
+	photoKey, err := api.FindRemoteMediaByHash(ctx, photo.hash)
+	if err != nil {
+		return fmt.Errorf("check Live Photo still deduplication: %w", err)
+	}
+	videoKey, err := api.FindRemoteMediaByHash(ctx, video.hash)
+	if err != nil {
+		return fmt.Errorf("check Live Photo video deduplication: %w", err)
+	}
+	photoKey, videoKey, err = recheckNewLivePhotoPair(ctx, api, photo.hash, video.hash, photoKey, videoKey)
+	if err != nil {
+		return fmt.Errorf("recheck Live Photo deduplication: %w", err)
+	}
+	photo.checked, photo.remoteKey = true, photoKey
+	video.checked, video.remoteKey = true, videoKey
+	return nil
+}
+
+// livePhotoSkipped reports whether a checked pair is skipped without any
+// upload: a component is already in the library and the still is not to be
+// reconciled into a Live Photo.
+func livePhotoSkipped(photo, video preparedFile, updateExistingPhotosToLive bool) bool {
+	if !photo.checked || !video.checked {
+		return false
+	}
+	if photo.remoteKey != "" {
+		return !updateExistingPhotosToLive
+	}
+	return video.remoteKey != ""
+}
+
 // livePhotoRecheckDelays are the waits before each recheck of a pair whose
 // components were both missing. Tests shorten them.
 var livePhotoRecheckDelays = []time.Duration{500 * time.Millisecond, time.Second}
@@ -172,7 +201,7 @@ var livePhotoRecheckDelays = []time.Duration{500 * time.Millisecond, time.Second
 // FindRemoteMediaByHash; this only rechecks empty answers.
 func recheckNewLivePhotoPair(
 	ctx context.Context,
-	api livePhotoUploadAPI,
+	api remoteHashFinder,
 	photoSHA1, videoSHA1 []byte,
 	photoKey, videoKey string,
 ) (string, string, error) {
