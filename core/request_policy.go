@@ -35,7 +35,7 @@ type RequestPolicy struct {
 	next     time.Time
 	cooldown time.Time
 	// adaptive paces Photos RPCs after a 429 even when interval is 0: it is
-	// set to half the rate that tripped the quota and relaxed step by step
+	// set to half the number of RPCs sent in the last minute and relaxed step by step
 	// while requests succeed (see observe). The slower of interval and
 	// adaptive applies.
 	adaptive time.Duration
@@ -129,7 +129,7 @@ func (p *RequestPolicy) wait(ctx context.Context, rpc bool) error {
 	}
 }
 
-// Adaptive pacing after a 429: start at half the rate that tripped it, and
+// Adaptive pacing after a 429: start at half the RPCs sent in the last minute, and
 // speed up by a fifth after every adaptiveRelaxAfter successful RPCs until
 // pacing is off again.
 const (

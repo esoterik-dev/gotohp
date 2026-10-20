@@ -280,3 +280,30 @@ func TestWaitHonoursAdaptiveInterval(t *testing.T) {
 		t.Fatalf("3 RPCs in %v, want >= 120ms apart in total", elapsed)
 	}
 }
+
+// README: after a 429, Photos requests run at half the number sent in the
+// last minute. Through the real request path: 120 requests, a 429, then
+// requests 1 s apart (60 a minute).
+func TestRateLimitSlowsLaterRequests(t *testing.T) {
+	policy := mustPolicy(t, 0, true, 0)
+	var sent []time.Time
+	api := &Api{policy: policy, authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			sent = append(sent, time.Now())
+			if len(sent) == 120 {
+				return statusResponse(429, http.Header{"Retry-After": []string{"0"}}), nil
+			}
+			return statusResponse(200, nil), nil
+		})}}
+	for range 123 {
+		_, _ = api.FindRemoteMediaByHash(context.Background(), make([]byte, 20))
+	}
+	if len(sent) != 123 {
+		t.Fatalf("%d requests sent", len(sent))
+	}
+	for i := 121; i < len(sent); i++ {
+		if gap := sent[i].Sub(sent[i-1]); gap < 900*time.Millisecond || gap > 1500*time.Millisecond {
+			t.Fatalf("request %d sent %v after the previous one, want about 1s", i, gap)
+		}
+	}
+}
