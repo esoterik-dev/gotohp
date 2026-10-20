@@ -37,7 +37,7 @@ func IsCLIInvocation(args []string) bool {
 		case strings.HasPrefix(arg, "-"):
 			return false
 		default:
-			return slices.Contains([]string{"upload", "credentials", "creds", "help", "version"}, arg)
+			return slices.Contains([]string{"upload", "verify-live-photos", "credentials", "creds", "help", "version"}, arg)
 		}
 	}
 	return false
@@ -79,7 +79,7 @@ func newRootCommand(info Info) *cobra.Command {
 	}
 	root.SetVersionTemplate("gotohp v{{.Version}}\n")
 	root.PersistentFlags().StringP("config", "c", "", "path to config file")
-	root.AddCommand(newUploadCommand(), newCredentialsCommand(), &cobra.Command{
+	root.AddCommand(newUploadCommand(), newVerifyLivePhotosCommand(), newCredentialsCommand(), &cobra.Command{
 		Use:   "version",
 		Short: "Show version information",
 		Args:  cobra.NoArgs,

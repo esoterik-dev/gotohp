@@ -40,3 +40,17 @@ func TestRequestPolicyFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyTakesRequestPolicyFlags(t *testing.T) {
+	cmd := newVerifyLivePhotosCommand()
+	if err := cmd.Flags().Parse([]string{"--retry-429=false", "--max-retries=1", "--requests-per-minute=60"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := requestPolicyFromFlags(cmd.Flags())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := core.NewRequestPolicy(1, false, 60); !reflect.DeepEqual(got, want) {
+		t.Fatalf("policy=%+v want %+v", got, want)
+	}
+}

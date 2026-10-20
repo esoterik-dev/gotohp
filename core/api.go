@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"app/generated"
@@ -32,6 +33,7 @@ type Api struct {
 	language          string
 	authData          string
 	client            *http.Client
+	authMu            sync.Mutex // guards authResponseCache for concurrent callers
 	policy            *RequestPolicy
 	authResponseCache map[string]string
 	commitEndpoint    string
@@ -127,10 +129,15 @@ func newAPIFromCredential(credentials string, proxy string) (*Api, error) {
 	return api, nil
 }
 
-// BearerToken returns a valid token, refreshing it when expired. ctx bounds
-// the refresh, including any shared 429 pause it waits behind.
+// BearerToken returns a valid token, refreshing it when expired. It is safe
+// for concurrent use by goroutines sharing one Api. The lock covers only the
+// cache, not the refresh request, so ctx can always cancel a waiting caller
+// (a refresh may sit behind a 429 pause); at worst a few workers refresh at
+// the same time when the token expires.
 func (a *Api) BearerToken(ctx context.Context) (string, error) {
-	expiryStr := a.authResponseCache["Expiry"]
+	a.authMu.Lock()
+	expiryStr, token := a.authResponseCache["Expiry"], a.authResponseCache["Auth"]
+	a.authMu.Unlock()
 	expiry, err := strconv.ParseInt(expiryStr, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid expiry time: %w", err)
@@ -141,10 +148,13 @@ func (a *Api) BearerToken(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to get auth token: %w", err)
 		}
+		a.authMu.Lock()
 		a.authResponseCache = resp
+		a.authMu.Unlock()
+		token = resp["Auth"]
 	}
 
-	if token, ok := a.authResponseCache["Auth"]; ok && token != "" {
+	if token != "" {
 		return token, nil
 	}
 
@@ -321,16 +331,32 @@ func (a *Api) GetUploadToken(ctx context.Context, shaHashB64 string, fileSize in
 // returns its media key, or "" when none exists. Transient failures are
 // retried here; an empty answer is a real "not found" and is not retried.
 func (a *Api) FindRemoteMediaByHash(ctx context.Context, shaHash []byte) (string, error) {
-	var mediaKey string
-	err := a.withRetry(ctx, a.retryConfig(), func(int) error {
-		var err error
-		mediaKey, err = a.findRemoteMediaOnce(ctx, shaHash)
-		return err
-	})
-	return mediaKey, err
+	match, err := a.FindRemoteMediaMatchesByHash(ctx, shaHash)
+	return match.PrimaryMediaKey, err
 }
 
-func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, error) {
+// RemoteMediaMatch holds the media keys the private hash lookup returns.
+// PrimaryMediaKey is the key the uploader has always used; RelatedMediaKey is
+// a nested key Google returns for some composite items such as Live Photos.
+// The lookup is metadata-only and never fetches media bytes.
+type RemoteMediaMatch struct {
+	PrimaryMediaKey string
+	RelatedMediaKey string
+}
+
+// FindRemoteMediaMatchesByHash is FindRemoteMediaByHash with both modeled
+// media-key fields, for callers that verify composite items.
+func (a *Api) FindRemoteMediaMatchesByHash(ctx context.Context, shaHash []byte) (RemoteMediaMatch, error) {
+	var match RemoteMediaMatch
+	err := a.withRetry(ctx, a.retryConfig(), func(int) error {
+		var err error
+		match, err = a.findRemoteMediaOnce(ctx, shaHash)
+		return err
+	})
+	return match, err
+}
+
+func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (RemoteMediaMatch, error) {
 	// Create the protobuf message
 
 	// Create and initialize the protobuf message with all required nested structures
@@ -346,13 +372,13 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, 
 	// Serialize the protobuf message
 	serializedData, err := proto.Marshal(&protoBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal protobuf: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("failed to marshal protobuf: %w", err)
 	}
 
 	// Get the bearer token
 	bearerToken, err := a.BearerToken(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get bearer token: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("failed to get bearer token: %w", err)
 	}
 
 	// Prepare headers
@@ -372,7 +398,7 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, 
 		bytes.NewReader(serializedData),
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Set headers
@@ -383,30 +409,31 @@ func (a *Api) findRemoteMediaOnce(ctx context.Context, shaHash []byte) (string, 
 	// Make the request
 	resp, err := a.do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// Check for errors
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := ReadResponseBody(resp)
-		return "", &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
+		return RemoteMediaMatch{}, &httpStatusError{statusCode: resp.StatusCode, body: string(body)}
 	}
 
 	// Parse the response body
 	bodyBytes, err := ReadResponseBody(resp)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	var pbResp generated.RemoteMatches
 	if err := proto.Unmarshal(bodyBytes, &pbResp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal protobuf: %w", err)
+		return RemoteMediaMatch{}, fmt.Errorf("failed to unmarshal protobuf: %w", err)
 	}
 
-	mediaKey := pbResp.GetMediaKey()
-
-	return mediaKey, nil
+	return RemoteMediaMatch{
+		PrimaryMediaKey: pbResp.GetMediaKey(),
+		RelatedMediaKey: pbResp.GetField1().GetField2().GetField2().GetField6().GetMediaKey(),
+	}, nil
 }
 
 // UploadProgressCallback is called with progress updates during file upload
