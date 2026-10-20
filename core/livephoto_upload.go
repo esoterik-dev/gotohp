@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type livePhotoUploadAPI interface {
@@ -91,6 +92,10 @@ func uploadLivePhotoWithCallback(
 	}
 	if videoCheckErr != nil {
 		return "", false, fmt.Errorf("check Live Photo video deduplication: %w", videoCheckErr)
+	}
+	photoRemoteKey, videoRemoteKey, err = recheckNewLivePhotoPair(ctx, api, photoSHA1, videoSHA1, photoRemoteKey, videoRemoteKey)
+	if err != nil {
+		return "", false, fmt.Errorf("recheck Live Photo deduplication: %w", err)
 	}
 	if photoRemoteKey != "" {
 		if options.UpdateExistingPhotosToLive {
@@ -183,6 +188,45 @@ func uploadLivePhotoWithCallback(
 		}
 	}
 	return mediaKey, false, nil
+}
+
+// livePhotoRecheckDelays are the waits before each recheck of a pair whose
+// components were both missing. Tests shorten them.
+var livePhotoRecheckDelays = []time.Duration{500 * time.Millisecond, time.Second}
+
+// recheckNewLivePhotoPair looks both components up again when neither was
+// found, just before a new pair would be created. The private hash endpoint
+// has been seen to return an empty result for an item that exists, and in
+// this case that creates a duplicate Live Photo. If either component turns
+// up, its key is returned and the caller skips or reconciles instead. When
+// one component was already found nothing new would be created, so nothing
+// is rechecked. Transport errors are already retried inside
+// FindRemoteMediaByHash; this only rechecks empty answers.
+func recheckNewLivePhotoPair(
+	ctx context.Context,
+	api livePhotoUploadAPI,
+	photoSHA1, videoSHA1 []byte,
+	photoKey, videoKey string,
+) (string, string, error) {
+	if photoKey != "" || videoKey != "" {
+		return photoKey, videoKey, nil
+	}
+	for _, delay := range livePhotoRecheckDelays {
+		if err := waitRequest(ctx, delay); err != nil {
+			return "", "", err
+		}
+		var err error
+		if photoKey, err = api.FindRemoteMediaByHash(ctx, photoSHA1); err != nil {
+			return "", "", err
+		}
+		if videoKey, err = api.FindRemoteMediaByHash(ctx, videoSHA1); err != nil {
+			return "", "", err
+		}
+		if photoKey != "" || videoKey != "" {
+			break
+		}
+	}
+	return photoKey, videoKey, nil
 }
 
 func reconcileExistingLivePhoto(
