@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Generated from the help text and compared byte for byte (TestCLIReferenceIsCurrent).
+docs/cli-reference.md text eol=lf

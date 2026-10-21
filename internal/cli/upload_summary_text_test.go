@@ -45,7 +45,8 @@ func TestUploadOnTerminalPrintsSummaryNotJSON(t *testing.T) {
 }
 
 func TestTextSummaryCountsAndLists(t *testing.T) {
-	wd := filepath.FromSlash("/runs/today")
+	wd := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "x.jpg")
 	in := func(name string) string { return filepath.Join(wd, "DCIM", name) }
 	s := uploadSummary{WorkingDirectory: wd, Canceled: true, Total: 30, Warnings: []uploadWarning{{Code: "x"}}}
 	s.Results = append(s.Results,
@@ -61,7 +62,7 @@ func TestTextSummaryCountsAndLists(t *testing.T) {
 	for i := 19; i >= 0; i-- {
 		s.Results = append(s.Results, uploadResult{Path: filepath.Join(wd, "later", fmt.Sprintf("f%02d.jpg", i)), Error: "429"})
 	}
-	s.Results = append(s.Results, uploadResult{Path: filepath.FromSlash("/elsewhere/x.jpg"), Error: "429"})
+	s.Results = append(s.Results, uploadResult{Path: elsewhere, Error: "429"})
 	var out strings.Builder
 	writeTextSummary(&out, s, 90*time.Second, "")
 	text := out.String()
@@ -81,7 +82,7 @@ func TestTextSummaryCountsAndLists(t *testing.T) {
 	}
 	// Failed files are listed by path, not in the order they finished; the
 	// later/ failures were added from f19 down to f00.
-	order := []string{filepath.FromSlash("/elsewhere/x.jpg"), filepath.FromSlash("DCIM/IMG_2.HEIC"), filepath.FromSlash("later/f00.jpg"), filepath.FromSlash("later/f17.jpg")}
+	order := []string{elsewhere, filepath.FromSlash("DCIM/IMG_2.HEIC"), filepath.FromSlash("later/f00.jpg"), filepath.FromSlash("later/f17.jpg")}
 	for i := 1; i < len(order); i++ {
 		if a, b := strings.Index(text, order[i-1]), strings.Index(text, order[i]); a < 0 || b < 0 || a > b {
 			t.Errorf("%s not listed before %s:\n%s", order[i-1], order[i], text)
