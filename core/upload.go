@@ -508,8 +508,9 @@ var supportedFormats = map[string]bool{
 	"mts": true, "tod": true, "wmv": true, "ts": true, "webm": true,
 }
 
-// isSupportedByGooglePhotos checks if a file extension is supported by Google Photos
-func isSupportedByGooglePhotos(filename string) bool {
+// IsSupportedByGooglePhotos reports whether the file has a photo or video
+// extension Google Photos accepts: the files an upload sends.
+func IsSupportedByGooglePhotos(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" {
 		return false
@@ -575,7 +576,7 @@ func filterGooglePhotosFilesWithCancel(paths []string, opts UploadOptions, cance
 		skipped = append(skipped, seenUploadFile{canonicalPath: canonicalUploadPath(path), info: info})
 	}
 	appendFile := func(path string, info os.FileInfo) {
-		if !opts.DisableUnsupportedFilesFilter && !isSupportedByGooglePhotos(path) {
+		if !opts.DisableUnsupportedFilesFilter && !IsSupportedByGooglePhotos(path) {
 			return
 		}
 		canonicalPath := canonicalUploadPath(path)

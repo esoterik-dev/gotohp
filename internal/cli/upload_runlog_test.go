@@ -195,6 +195,8 @@ func TestLogFileRefusedBeforeWork(t *testing.T) {
 	writeFixture(t, nested, "other photo")
 	single := filepath.Join(dir, "single.jpg")
 	writeFixture(t, single, "single photo")
+	notes := filepath.Join(src, "notes.txt")
+	writeFixture(t, notes, "notes")
 	report := filepath.Join(dir, "report.json")
 	writeFixture(t, report, "old report")
 	state := filepath.Join(dir, "state.json")
@@ -209,13 +211,14 @@ func TestLogFileRefusedBeforeWork(t *testing.T) {
 		log   string
 		extra []string
 	}{
-		"config":           {[]string{src}, config, nil},
-		"upload path":      {[]string{single}, single, nil},
-		"file in a folder": {[]string{src, "--recursive"}, nested, nil},
-		"report":           {[]string{src}, report, []string{"--report-file", report}},
-		"state file":       {[]string{src}, state, []string{"--state-file", state}},
-		"state lock":       {[]string{src}, state + ".lock", []string{"--state-file", state}},
-		"directory":        {[]string{src}, logDir, nil},
+		"config":                         {[]string{src}, config, nil},
+		"upload path":                    {[]string{single}, single, nil},
+		"file in a folder":               {[]string{src, "--recursive"}, nested, nil},
+		"any file with --disable-filter": {[]string{src, "--recursive", "--disable-filter"}, notes, nil},
+		"report":                         {[]string{src}, report, []string{"--report-file", report}},
+		"state file":                     {[]string{src}, state, []string{"--state-file", state}},
+		"state lock":                     {[]string{src}, state + ".lock", []string{"--state-file", state}},
+		"directory":                      {[]string{src}, logDir, nil},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

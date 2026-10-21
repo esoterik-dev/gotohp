@@ -138,6 +138,10 @@ func uploadCommand(cmd *cobra.Command, paths []string, settings uploadRunSetting
 		runLog.drop()
 		return err
 	}
+	report, _ := f.GetString("report-file")
+	if err := checkMediaFiles("--report-file", report, paths, opts.DisableUnsupportedFilesFilter); err != nil {
+		return err
+	}
 	runLog.open()
 	policy, err := requestPolicyFromFlags(f)
 	if err != nil {
