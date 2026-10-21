@@ -36,7 +36,7 @@ func TestRetryReportFiltersAndPreservesPairs(t *testing.T) {
 }
 
 func TestRetryReportResolvesAgainstRecordedWorkingDirectory(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator), "home", "user")
+	root := t.TempDir()
 	abs := filepath.Join(root, "elsewhere", "abs.jpg")
 	path := writeRetryReport(t, `{"workingDirectory":`+quoteJSON(root)+`,"results":[{"path":"photos/IMG_1.jpg","error":"429"},{"path":`+quoteJSON(abs)+`,"error":"429"}]}`)
 	got, err := retryReportPaths(path, false, io.Discard)
