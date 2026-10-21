@@ -42,8 +42,8 @@ func protectedInputs(f *pflag.FlagSet) map[string][]string {
 }
 
 // validateLogFile rejects a --log-file that would overwrite an input file,
-// the report, a photo or video to upload, or that names a directory, before
-// any upload starts. Like --report-file, any other file may be replaced.
+// the report, a file to upload, or that names a directory, before any upload
+// starts. Like --report-file, any other file may be replaced.
 func validateLogFile(f *pflag.FlagSet, paths []string) error {
 	output, _ := f.GetString("log-file")
 	if output == "" {
@@ -56,13 +56,15 @@ func validateLogFile(f *pflag.FlagSet, paths []string) error {
 	if err := checkOutputFile("--log-file", output, inputs); err != nil {
 		return err
 	}
-	return checkMediaFiles("--log-file", output, paths)
+	anyFile, _ := f.GetBool("disable-filter")
+	return checkMediaFiles("--log-file", output, paths, anyFile)
 }
 
 // checkMediaFiles rejects an output that is one of paths, or an existing
-// photo or video inside one of them: the files a run reads and uploads.
-// Other files there, such as an earlier report or log, may be replaced.
-func checkMediaFiles(flag, output string, paths []string) error {
+// photo or video inside one of them (any file, with anyFile): the files a run
+// reads and uploads. Other files there, such as an earlier report or log, may
+// be replaced.
+func checkMediaFiles(flag, output string, paths []string, anyFile bool) error {
 	if output == "" {
 		return nil
 	}
@@ -71,21 +73,26 @@ func checkMediaFiles(flag, output string, paths []string) error {
 			return fmt.Errorf("%s must not overwrite %s, a file to upload or read", flag, path)
 		}
 	}
-	if _, err := os.Stat(output); err != nil || !core.IsSupportedByGooglePhotos(output) {
+	if _, err := os.Stat(output); err != nil || !anyFile && !core.IsSupportedByGooglePhotos(output) {
 		return nil
+	}
+	what := "a photo or video"
+	if anyFile {
+		what = "a file uploaded with --disable-filter"
 	}
 	for _, path := range paths {
 		if info, err := os.Stat(path); err == nil && info.IsDir() && insideDir(output, path) {
-			return fmt.Errorf("%s must not overwrite a photo or video in %s", flag, path)
+			return fmt.Errorf("%s must not overwrite %s in %s", flag, what, path)
 		}
 	}
 	return nil
 }
 
 // validateVerifyLogFile rejects a verify-live-photos --log-file that would
-// overwrite the upload report, the verification report, the config, or that
-// names a directory. Any other file may be replaced, as with upload.
-func validateVerifyLogFile(f *pflag.FlagSet, inputs map[string][]string, reportFile string) error {
+// overwrite the upload report, the verification report, the config, a photo
+// or video in media, or that names a directory. Any other file may be
+// replaced, as with upload.
+func validateVerifyLogFile(f *pflag.FlagSet, inputs map[string][]string, reportFile string, media []string) error {
 	output, _ := f.GetString("log-file")
 	if output == "" {
 		return nil
@@ -94,7 +101,10 @@ func validateVerifyLogFile(f *pflag.FlagSet, inputs map[string][]string, reportF
 	if reportFile != "" {
 		inputs["--report-file"] = []string{reportFile}
 	}
-	return checkOutputFile("--log-file", output, inputs)
+	if err := checkOutputFile("--log-file", output, inputs); err != nil {
+		return err
+	}
+	return checkMediaFiles("--log-file", output, media, false)
 }
 
 // checkReportFile is validateReportFile for any command: inputs maps a

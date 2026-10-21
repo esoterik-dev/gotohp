@@ -152,16 +152,17 @@ func verifyLivePhotosCommand(cmd *cobra.Command, args []string, runLog *runLog) 
 	}
 	reportFile, _ := f.GetString("report-file")
 	inputs := map[string][]string{"the upload report": {reportPath}}
+	// The photos and videos to verify, once the upload report is read.
+	var media []string
 	// A run that stops before the --log-file check still records why.
-	defer runLog.openIfSafe(func() error { return validateVerifyLogFile(f, inputs, reportFile) })
+	defer runLog.openIfSafe(func() error { return validateVerifyLogFile(f, inputs, reportFile, media) })
 	if err := checkReportFile(reportFile, inputs); err != nil {
 		return err
 	}
-	if err := validateVerifyLogFile(f, inputs, reportFile); err != nil {
+	if err := validateVerifyLogFile(f, inputs, reportFile, nil); err != nil {
 		runLog.drop()
 		return err
 	}
-	runLog.open()
 
 	uploadReport, err := readVerifyUploadReport(reportPath)
 	if err != nil {
@@ -177,13 +178,18 @@ func verifyLivePhotosCommand(cmd *cobra.Command, args []string, runLog *runLog) 
 	if len(pairs) == 0 {
 		return fmt.Errorf("no two-file Live Photo pairs found in %s", reportPath)
 	}
-	media := []string{sourceRoot}
+	media = []string{sourceRoot}
 	for _, pair := range pairs {
 		media = append(media, pair.PhotoPath, pair.VideoPath)
 	}
-	if err := checkMediaFiles("--report-file", reportFile, media); err != nil {
+	if err := checkMediaFiles("--report-file", reportFile, media, false); err != nil {
 		return err
 	}
+	if err := validateVerifyLogFile(f, inputs, reportFile, media); err != nil {
+		runLog.drop()
+		return err
+	}
+	runLog.open()
 	if limit > 0 && limit < len(pairs) {
 		pairs = pairs[:limit]
 	}

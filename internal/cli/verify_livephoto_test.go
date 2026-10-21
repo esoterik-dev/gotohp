@@ -167,6 +167,28 @@ func TestVerificationReportFileRefusedBeforeWork(t *testing.T) {
 	}
 }
 
+// The log is checked against the pairs' files before it is first written, so
+// it never replaces the photo or video it verifies.
+func TestVerificationLogFileRefusesPairMedia(t *testing.T) {
+	for name, args := range map[string][]string{
+		"pair photo":  {"--log-file", "IMG_1.HEIC"},
+		"pair video":  {"--log-file", "IMG_1.MOV"},
+		"source root": {"--source-root", "dcim", "--log-file", "dcim/IMG_9.JPG"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := runVerifyInDir(t, args...)
+			if err == nil || !strings.Contains(err.Error(), "--log-file") {
+				t.Fatalf("%v was not refused before verification: %v", args, err)
+			}
+			for _, media := range []string{"IMG_1.HEIC", "IMG_1.MOV", "dcim/IMG_9.JPG"} {
+				if data, _ := os.ReadFile(media); string(data) != media {
+					t.Fatalf("%s was replaced: %s", media, data)
+				}
+			}
+		})
+	}
+}
+
 func TestVerificationReportFileAllowsNewFile(t *testing.T) {
 	err := runVerifyInDir(t, "--report-file", "verification.json")
 	if err == nil || strings.Contains(err.Error(), "--report-file") {

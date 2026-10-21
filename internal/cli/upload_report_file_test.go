@@ -139,7 +139,8 @@ func TestReportFileDirectoryRejectedBeforeUpload(t *testing.T) {
 }
 
 // --report-file is refused before any work when it would replace a photo or
-// video the run uploads; the photo is left untouched.
+// video the run uploads, or with --disable-filter any file it uploads; the
+// file is left untouched.
 func TestReportFileRefusesUploadMedia(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "gotohp.config")
@@ -149,12 +150,16 @@ func TestReportFileRefusesUploadMedia(t *testing.T) {
 	writeFixture(t, nested, "photo")
 	single := filepath.Join(dir, "single.jpg")
 	writeFixture(t, single, "single photo")
+	notes := filepath.Join(src, "notes.txt")
+	writeFixture(t, notes, "notes")
 	for name, c := range map[string]struct {
 		paths  []string
 		report string
 	}{
 		"upload path":       {[]string{single}, single},
 		"photo in a folder": {[]string{src, "--recursive"}, nested},
+		// --disable-filter uploads every file, so none in the folder may be replaced.
+		"any file with --disable-filter": {[]string{src, "--recursive", "--disable-filter"}, notes},
 	} {
 		t.Run(name, func(t *testing.T) {
 			before, _ := os.ReadFile(c.report)
