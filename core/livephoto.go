@@ -38,6 +38,10 @@ type PreflightWarning struct {
 	// Skipped means Paths are not uploaded; each such warning is also
 	// reported as one skipped file result.
 	Skipped bool `json:"Skipped"`
+	// Failed means Paths are not uploaded because they could not be read;
+	// each such warning is also reported as one failed file result, so the
+	// run fails and a retry picks the files up again.
+	Failed bool `json:"Failed"`
 }
 
 type LivePhotoClassificationOptions struct {
@@ -78,10 +82,11 @@ type livePhotoCandidates struct {
 //
 // With SkipIncomplete, no file that may be half of a Live Photo is uploaded
 // on its own: a still uploaded without its video cannot be linked to it
-// later. Besides unmatched members, that covers files whose metadata cannot
-// be read, videos without the still-image-time marker, and identifiers
-// shared by several photos or videos. Each is skipped with a warning.
-// Without SkipIncomplete they are uploaded as single files.
+// later. Besides unmatched members, that covers videos without the
+// still-image-time marker and identifiers shared by several photos or
+// videos, which are skipped with a warning, and files whose metadata cannot
+// be read, which fail so they can be retried. Without SkipIncomplete they
+// are all uploaded as single files.
 func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, reader LivePhotoMetadataReader) ([]UploadWorkItem, []PreflightWarning) {
 	if !options.Enabled {
 		work := make([]UploadWorkItem, 0, len(paths))
@@ -110,6 +115,22 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 		}
 		warnings = append(warnings, warning)
 	}
+	// unreadable records a file whose metadata read failed, e.g. on a flaky
+	// phone mount. It is not uploaded, like an uncertain file, but fails
+	// instead of being skipped: the read may work next time.
+	unreadable := func(index int, path string, err error) {
+		warning := metadataReadWarning(path, err)
+		if options.SkipIncomplete {
+			consumed[index] = true
+			warning.Failed = true
+			warning.Message += "; not uploaded, since it may be half of a Live Photo; retry it once it can be read"
+		}
+		warnings = append(warnings, warning)
+	}
+	// unmarked holds videos with neither a content identifier nor the
+	// still-image-time marker under the filename override. Each is an
+	// ordinary video unless a photo shares its stem.
+	var unmarked []indexedLivePhotoMedia
 	for index, path := range paths {
 		if options.Cancelled != nil && options.Cancelled() {
 			return nil, nil
@@ -126,7 +147,7 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 				continue
 			}
 			if err != nil {
-				uncertain(index, metadataReadWarning(path, err))
+				unreadable(index, path, err)
 				continue
 			}
 			candidates := candidatesForIdentifier(candidatesByIdentifier, strings.ToLower(identifier))
@@ -137,7 +158,11 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 				continue
 			}
 			if err != nil && !errors.Is(err, ErrContentIdentifierMissing) {
-				uncertain(index, metadataReadWarning(path, err))
+				unreadable(index, path, err)
+				continue
+			}
+			if !metadata.HasStillImageTime && metadata.ContentIdentifier == "" {
+				unmarked = append(unmarked, indexedLivePhotoMedia{path: path, index: index})
 				continue
 			}
 			if !metadata.HasStillImageTime {
@@ -157,6 +182,22 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 			candidates := candidatesForIdentifier(candidatesByIdentifier, identifier)
 			candidates.videos = append(candidates.videos, indexedLivePhotoMedia{path: path, index: index})
 		}
+	}
+
+	for _, video := range unmarked {
+		if candidates := candidatesByIdentifier[livePhotoFilenameMatchKey(video.path)]; candidates != nil && len(candidates.photos) > 0 {
+			uncertain(video.index, PreflightWarning{
+				Paths:   []string{video.path},
+				Code:    "missing-still-image-time",
+				Message: "video shares a filename stem with a photo but has no still-image-time marker",
+			})
+			continue
+		}
+		warnings = append(warnings, PreflightWarning{
+			Paths:   []string{video.path},
+			Code:    "missing-still-image-time",
+			Message: "video has no Live Photo content identifier or still-image-time marker; uploaded as an ordinary video",
+		})
 	}
 
 	pairsByIndex := make(map[int]LivePhotoPair)

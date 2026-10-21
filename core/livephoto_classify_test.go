@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -104,14 +105,58 @@ func TestUncertainLivePhotoFilesAreSkipped(t *testing.T) {
 			t.Errorf("%s warns about %v, want %v", code, got, want)
 		}
 	}
+	// An unreadable file fails instead of being skipped, so the run reports
+	// it and --retry-report tries it again once the mount behaves.
+	for _, w := range warnings {
+		if failed := w.Code == "metadata-read-failed"; w.Failed != failed || w.Skipped == failed {
+			t.Errorf("warning %s: Failed=%v Skipped=%v", w.Code, w.Failed, w.Skipped)
+		}
+	}
 
 	// --upload-incomplete-live-photos: the user asked for unmatched members
 	// as single files, so the uncertain ones are uploaded singly too.
-	work, _ = ClassifyUploadWork(paths, LivePhotoClassificationOptions{Enabled: true, SkipIncomplete: false}, meta)
+	work, warnings = ClassifyUploadWork(paths, LivePhotoClassificationOptions{Enabled: true, SkipIncomplete: false}, meta)
 	want := []string{"amb.MOV", "amb1.HEIC", "amb2.HEIC", "lone.HEIC", "nostill.MOV", "ok.HEIC+ok.MOV",
 		"plain.jpg", "plain.mp4", "unreadable.HEIC", "unreadable.MOV"}
 	if got := classified(work); !reflect.DeepEqual(got, want) {
 		t.Fatalf("with incomplete uploads allowed: %v, want %v", got, want)
+	}
+	for _, w := range warnings {
+		if w.Skipped || w.Failed {
+			t.Errorf("with incomplete uploads allowed, warning %s: Failed=%v Skipped=%v", w.Code, w.Failed, w.Skipped)
+		}
+	}
+}
+
+// --ignore-apple-metadata pairs by filename stem. A video with neither a
+// Live Photo identifier nor the still-image-time marker, and no photo of the
+// same stem, is an ordinary video: it is uploaded, as without the override.
+// One that shares a stem with a photo may be half of a Live Photo, so it is
+// skipped like other files that cannot be paired.
+func TestFilenameOverrideUploadsOrdinaryVideos(t *testing.T) {
+	meta := fakeMetadata{videos: map[string]LivePhotoMetadata{
+		"IMG_2.MOV": {HasStillImageTime: true},
+	}}
+	paths := []string{"clip.MOV", "IMG_1.HEIC", "IMG_1.MOV", "IMG_2.HEIC", "IMG_2.MOV"}
+	work, warnings := ClassifyUploadWork(paths,
+		LivePhotoClassificationOptions{Enabled: true, SkipIncomplete: true, IgnoreAppleMetadata: true}, meta)
+	if got, want := classified(work), []string{"IMG_2.HEIC+IMG_2.MOV", "clip.MOV"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("would upload %v, want %v", got, want)
+	}
+	byPath := map[string]PreflightWarning{}
+	for _, w := range warnings {
+		for _, path := range w.Paths {
+			byPath[path] = w
+		}
+	}
+	if w := byPath["clip.MOV"]; w.Skipped || strings.Contains(w.Message, "content identifier but") {
+		t.Errorf("ordinary video warning %+v", w)
+	}
+	if w := byPath["IMG_1.MOV"]; !w.Skipped || w.Code != "missing-still-image-time" || strings.Contains(w.Message, "content identifier but") {
+		t.Errorf("stem-matched video without marker: %+v", w)
+	}
+	if w := byPath["IMG_1.HEIC"]; !w.Skipped || w.Code != "incomplete-live-photo-skipped" {
+		t.Errorf("photo whose video is skipped: %+v", w)
 	}
 }
 
@@ -129,8 +174,10 @@ func (r *warningRecorder) Warning(w PreflightWarning) {
 
 // Through the real upload pipeline: a MOV whose metadata cannot be read (a
 // truncated or garbled file, as a flaky phone mount can return) is not
-// uploaded as a standalone video, while an ordinary photo still is.
-func TestUploadSkipsLivePhotoVideoWithUnreadableMetadata(t *testing.T) {
+// uploaded as a standalone video, while an ordinary photo still is. The
+// video fails rather than being skipped, so the run reports a failure and
+// --retry-report retries it.
+func TestUploadFailsLivePhotoVideoWithUnreadableMetadata(t *testing.T) {
 	dir := t.TempDir()
 	photo := filepath.Join(dir, "IMG_0001.JPG")
 	video := filepath.Join(dir, "IMG_0002.MOV")
@@ -149,8 +196,8 @@ func TestUploadSkipsLivePhotoVideoWithUnreadableMetadata(t *testing.T) {
 	if lib.uploads != 1 {
 		t.Fatalf("uploads=%d; want only the photo", lib.uploads)
 	}
-	// The video still appears in the results, as skipped, so the report
-	// accounts for every file.
+	// The video still appears in the results, as failed, so the report
+	// accounts for every file and a retry picks it up.
 	byPath := map[string]FileUploadResult{}
 	for _, r := range rec.results {
 		byPath[r.Path] = r
@@ -158,7 +205,7 @@ func TestUploadSkipsLivePhotoVideoWithUnreadableMetadata(t *testing.T) {
 	if r := byPath[photo]; len(rec.results) != 2 || r.Skipped || r.IsError || r.MediaKey == "" {
 		t.Fatalf("photo result %+v (results %+v)", r, rec.results)
 	}
-	if r := byPath[video]; !r.Skipped || r.SkipCode != "metadata-read-failed" {
+	if r := byPath[video]; !r.IsError || r.Skipped || r.ErrorMessage == "" || !reflect.DeepEqual(r.Paths, []string{video}) {
 		t.Fatalf("video result %+v", r)
 	}
 	if codes := warningCodes(rec.warnings); !reflect.DeepEqual(codes["metadata-read-failed"], []string{video}) {

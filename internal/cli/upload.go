@@ -44,10 +44,10 @@ type fileCompleteMsg struct {
 }
 
 type preflightWarningMsg struct {
-	paths   []string
-	code    string
-	message string
-	skipped bool
+	paths      []string
+	code       string
+	message    string
+	fileResult bool
 }
 
 type uploadCompleteMsg struct{}
@@ -146,8 +146,9 @@ type uploadWarning struct {
 	Paths   []string `json:"paths,omitempty"`
 	Code    string   `json:"code"`
 	Message string   `json:"message"`
-	// skipped warnings are also file results, so the summary leaves them out.
-	skipped bool
+	// fileResult warnings (skipped or failed files) are also file results,
+	// so the summary leaves them out.
+	fileResult bool
 }
 
 type albumSummary struct {
@@ -259,10 +260,10 @@ func (m uploadModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case preflightWarningMsg:
 		m.warnings = append(m.warnings, uploadWarning{
-			Paths:   msg.paths,
-			Code:    msg.code,
-			Message: msg.message,
-			skipped: msg.skipped,
+			Paths:      msg.paths,
+			Code:       msg.code,
+			Message:    msg.message,
+			fileResult: msg.fileResult,
 		})
 		return m, nil
 
@@ -462,10 +463,10 @@ func (r teaReporter) TotalBytesDelta(int64) {}
 
 func (r teaReporter) Warning(warning core.PreflightWarning) {
 	r.p.Send(preflightWarningMsg{
-		paths:   warning.Paths,
-		code:    warning.Code,
-		message: warning.Message,
-		skipped: warning.Skipped,
+		paths:      warning.Paths,
+		code:       warning.Code,
+		message:    warning.Message,
+		fileResult: warning.Skipped || warning.Failed,
 	})
 }
 
@@ -648,7 +649,7 @@ func finishUpload(model uploadModel, output io.Writer, reportFile string) error 
 func buildUploadSummary(model uploadModel) uploadSummary {
 	warnings := make([]uploadWarning, 0, len(model.warnings))
 	for _, warning := range model.warnings {
-		if warning.skipped {
+		if warning.fileResult {
 			continue
 		}
 		warnings = append(warnings, warning)

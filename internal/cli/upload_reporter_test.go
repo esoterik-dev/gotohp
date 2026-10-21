@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -147,5 +149,44 @@ func TestTeaReporterPreservesAlbumEvents(t *testing.T) {
 			}
 			assertReporterJSON(t, model, tc.json)
 		})
+	}
+}
+
+// A Live Photo file whose metadata could not be read fails in preflight
+// (core marks the warning Failed and reports a failed result). The run must
+// exit 1, the report lists the file once, as a failure rather than as a
+// warning too, and --retry-report picks it up.
+func TestUnreadableLivePhotoFileFailsAndIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	video := filepath.Join(dir, "IMG_0002.MOV")
+	message := "could not read Live Photo metadata: input/output error; not uploaded"
+	model := runReporterProgram(t, func(r teaReporter) {
+		r.UploadStart(core.UploadBatchStart{Total: 1})
+		r.Warning(core.PreflightWarning{Paths: []string{video}, Code: "metadata-read-failed", Message: message, Failed: true})
+		r.FileResult(core.FileUploadResult{Path: video, Paths: []string{video}, IsError: true,
+			Error: errors.New(message), ErrorMessage: message})
+	})
+	report := filepath.Join(dir, "report.json")
+	err := finishUpload(model, io.Discard, report)
+	if exit, ok := err.(exitError); !ok || exit.code != 1 {
+		t.Fatalf("finishUpload = %v, want exit 1", err)
+	}
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Failed   int               `json:"failed"`
+		Warnings []json.RawMessage `json:"warnings"`
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Failed != 1 || len(summary.Warnings) != 0 {
+		t.Errorf("report failed=%d warnings=%d, want 1 and 0:\n%s", summary.Failed, len(summary.Warnings), data)
+	}
+	paths, err := retryReportPaths(report, true, io.Discard)
+	if err != nil || !reflect.DeepEqual(paths, []string{video}) {
+		t.Fatalf("retry paths %v, %v; want [%s]", paths, err, video)
 	}
 }

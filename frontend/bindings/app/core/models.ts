@@ -316,6 +316,13 @@ export class PreflightWarning {
      */
     "Skipped": boolean;
 
+    /**
+     * Failed means Paths are not uploaded because they could not be read;
+     * each such warning is also reported as one failed file result, so the
+     * run fails and a retry picks the files up again.
+     */
+    "Failed": boolean;
+
     /** Creates a new PreflightWarning instance. */
     constructor($$source: Partial<PreflightWarning> = {}) {
         if (!("Paths" in $$source)) {
@@ -329,6 +336,9 @@ export class PreflightWarning {
         }
         if (!("Skipped" in $$source)) {
             this["Skipped"] = false;
+        }
+        if (!("Failed" in $$source)) {
+            this["Failed"] = false;
         }
 
         Object.assign(this, $$source);

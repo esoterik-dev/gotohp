@@ -34,6 +34,8 @@ export interface PreflightWarning {
   Message: string;
   // Skipped: the paths are not uploaded; core also reports them as a skipped result.
   Skipped: boolean;
+  // Failed: the paths could not be read and are not uploaded; core also reports them as a failed result.
+  Failed: boolean;
 }
 
 export interface UploadBatchStart {
@@ -157,7 +159,7 @@ class UploadManager {
 
     Events.On("uploadWarning", (event: { data: PreflightWarning }) => {
       this.state.warnings.push(event.data);
-      if (!event.data.Skipped) {
+      if (!event.data.Skipped && !event.data.Failed) {
         this.state.results.warnings.push({
           paths: event.data.Paths,
           code: event.data.Code,
