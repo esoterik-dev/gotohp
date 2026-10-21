@@ -29,6 +29,11 @@ func ParseScottyFinalizeToken(raw []byte) (ScottyFinalizeToken, error) {
 		if tagLength < 0 {
 			return ScottyFinalizeToken{}, fmt.Errorf("invalid Scotty finalize token tag: %w", protowire.ParseError(tagLength))
 		}
+		if !number.IsValid() {
+			// ConsumeTag only bounds the number by int32; protobuf rejects
+			// numbers above 2^29-1, so such an envelope is not wire-valid.
+			return ScottyFinalizeToken{}, fmt.Errorf("invalid Scotty finalize token field number %d", number)
+		}
 		value := raw[offset+tagLength:]
 		valueLength := protowire.ConsumeFieldValue(number, wireType, value)
 		if valueLength < 0 {
