@@ -35,6 +35,13 @@ type PreflightWarning struct {
 	Paths   []string `json:"Paths"`
 	Code    string   `json:"Code"`
 	Message string   `json:"Message"`
+	// Skipped means Paths are not uploaded; each such warning is also
+	// reported as one skipped file result.
+	Skipped bool `json:"Skipped"`
+	// Failed means Paths are not uploaded because they could not be read;
+	// each such warning is also reported as one failed file result, so the
+	// run fails and a retry picks the files up again.
+	Failed bool `json:"Failed"`
 }
 
 type LivePhotoClassificationOptions struct {
@@ -72,6 +79,14 @@ type livePhotoCandidates struct {
 // ClassifyUploadWork normally pairs files by their embedded Apple content
 // identifier. The explicit CLI override uses case-insensitive filename stems;
 // it remains one-to-one and still requires valid Live Photo video timing data.
+//
+// With SkipIncomplete, no file that may be half of a Live Photo is uploaded
+// on its own: a still uploaded without its video cannot be linked to it
+// later. Besides unmatched members, that covers videos without the
+// still-image-time marker and identifiers shared by several photos or
+// videos, which are skipped with a warning, and files whose metadata cannot
+// be read, which fail so they can be retried. Without SkipIncomplete they
+// are all uploaded as single files.
 func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, reader LivePhotoMetadataReader) ([]UploadWorkItem, []PreflightWarning) {
 	if !options.Enabled {
 		work := make([]UploadWorkItem, 0, len(paths))
@@ -89,6 +104,33 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 
 	candidatesByIdentifier := make(map[string]*livePhotoCandidates)
 	warnings := make([]PreflightWarning, 0)
+	consumed := make(map[int]bool)
+	// uncertain records a file that may belong to a Live Photo but cannot be
+	// paired; it is skipped unless incomplete members may be uploaded.
+	uncertain := func(index int, warning PreflightWarning) {
+		if options.SkipIncomplete {
+			consumed[index] = true
+			warning.Skipped = true
+			warning.Message += "; skipped so it is not uploaded without its Live Photo partner"
+		}
+		warnings = append(warnings, warning)
+	}
+	// unreadable records a file whose metadata read failed, e.g. on a flaky
+	// phone mount. It is not uploaded, like an uncertain file, but fails
+	// instead of being skipped: the read may work next time.
+	unreadable := func(index int, path string, err error) {
+		warning := metadataReadWarning(path, err)
+		if options.SkipIncomplete {
+			consumed[index] = true
+			warning.Failed = true
+			warning.Message += "; not uploaded, since it may be half of a Live Photo; retry it once it can be read"
+		}
+		warnings = append(warnings, warning)
+	}
+	// unmarked holds videos with neither a content identifier nor the
+	// still-image-time marker under the filename override. Each is an
+	// ordinary video unless a photo shares its stem.
+	var unmarked []indexedLivePhotoMedia
 	for index, path := range paths {
 		if options.Cancelled != nil && options.Cancelled() {
 			return nil, nil
@@ -105,7 +147,7 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 				continue
 			}
 			if err != nil {
-				warnings = append(warnings, metadataReadWarning(path, err))
+				unreadable(index, path, err)
 				continue
 			}
 			candidates := candidatesForIdentifier(candidatesByIdentifier, strings.ToLower(identifier))
@@ -116,11 +158,15 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 				continue
 			}
 			if err != nil && !errors.Is(err, ErrContentIdentifierMissing) {
-				warnings = append(warnings, metadataReadWarning(path, err))
+				unreadable(index, path, err)
+				continue
+			}
+			if !metadata.HasStillImageTime && metadata.ContentIdentifier == "" {
+				unmarked = append(unmarked, indexedLivePhotoMedia{path: path, index: index})
 				continue
 			}
 			if !metadata.HasStillImageTime {
-				warnings = append(warnings, PreflightWarning{
+				uncertain(index, PreflightWarning{
 					Paths:   []string{path},
 					Code:    "missing-still-image-time",
 					Message: "video has a Live Photo content identifier but no still-image-time marker",
@@ -138,8 +184,23 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 		}
 	}
 
+	for _, video := range unmarked {
+		if candidates := candidatesByIdentifier[livePhotoFilenameMatchKey(video.path)]; candidates != nil && len(candidates.photos) > 0 {
+			uncertain(video.index, PreflightWarning{
+				Paths:   []string{video.path},
+				Code:    "missing-still-image-time",
+				Message: "video shares a filename stem with a photo but has no still-image-time marker",
+			})
+			continue
+		}
+		warnings = append(warnings, PreflightWarning{
+			Paths:   []string{video.path},
+			Code:    "missing-still-image-time",
+			Message: "video has no Live Photo content identifier or still-image-time marker; uploaded as an ordinary video",
+		})
+	}
+
 	pairsByIndex := make(map[int]LivePhotoPair)
-	consumed := make(map[int]bool)
 	identifiers := sortedLivePhotoIdentifiers(candidatesByIdentifier)
 	for _, identifier := range identifiers {
 		if options.Cancelled != nil && options.Cancelled() {
@@ -167,11 +228,16 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 			ambiguousPaths := candidatePaths(candidates)
 			code := "ambiguous-identifier"
 			message := "multiple photo or video candidates share one Live Photo identifier"
+			// Ambiguity skips every candidate instead of silently falling back
+			// to single uploads: always with the filename override, and with
+			// Apple metadata unless incomplete members may be uploaded.
+			skip := options.IgnoreAppleMetadata || options.SkipIncomplete
 			if options.IgnoreAppleMetadata {
 				code = "ambiguous-filename-stem"
 				message = "multiple photo or video candidates share one filename stem"
-				// Filename matching is an explicit override, so ambiguity must skip
-				// every candidate instead of silently falling back to single uploads.
+			}
+			if skip {
+				message += "; all of them are skipped"
 				for _, photo := range candidates.photos {
 					consumed[photo.index] = true
 				}
@@ -183,6 +249,7 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 				Paths:   ambiguousPaths,
 				Code:    code,
 				Message: message,
+				Skipped: skip,
 			})
 			continue
 		}
@@ -197,6 +264,7 @@ func ClassifyUploadWork(paths []string, options LivePhotoClassificationOptions, 
 			warnings = append(warnings, PreflightWarning{
 				Paths:   orphanPaths,
 				Code:    "incomplete-live-photo-skipped",
+				Skipped: true,
 				Message: "Skipped an incomplete Live Photo because its matching file is not in this queue. You can disable this check in Settings.",
 			})
 		}

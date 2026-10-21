@@ -32,6 +32,10 @@ export interface PreflightWarning {
   Paths: string[];
   Code: string;
   Message: string;
+  // Skipped: the paths are not uploaded; core also reports them as a skipped result.
+  Skipped: boolean;
+  // Failed: the paths could not be read and are not uploaded; core also reports them as a failed result.
+  Failed: boolean;
 }
 
 export interface UploadBatchStart {
@@ -50,10 +54,6 @@ export interface AlbumStatus {
 export interface AlbumError {
   AlbumName: string;
   Error: string;
-}
-
-function isSkippedUploadWarning(code: string): boolean {
-  return code === "incomplete-live-photo-skipped" || code === "ambiguous-filename-stem";
 }
 
 export interface UploadState {
@@ -159,7 +159,7 @@ class UploadManager {
 
     Events.On("uploadWarning", (event: { data: PreflightWarning }) => {
       this.state.warnings.push(event.data);
-      if (!isSkippedUploadWarning(event.data.Code)) {
+      if (!event.data.Skipped && !event.data.Failed) {
         this.state.results.warnings.push({
           paths: event.data.Paths,
           code: event.data.Code,

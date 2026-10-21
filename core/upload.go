@@ -355,27 +355,37 @@ func (m *UploadManager) finish() {
 }
 
 func (m *UploadManager) reportPreflight(uploadItemCount int, warnings []PreflightWarning) {
-	skippedCount := 0
+	preflightResults := 0
 	for _, warning := range warnings {
-		if isSkippedPreflightWarning(warning.Code) {
-			skippedCount++
+		if warning.Skipped || warning.Failed {
+			preflightResults++
 		}
 	}
 
 	// Start before emitting warnings/results so the frontend resets its previous
 	// batch while retaining every event from this preflight.
 	m.reporter.UploadStart(UploadBatchStart{
-		Total:      uploadItemCount + skippedCount,
+		Total:      uploadItemCount + preflightResults,
 		TotalBytes: 0,
 	})
 	for _, warning := range warnings {
 		m.reporter.Warning(warning)
-		if !isSkippedPreflightWarning(warning.Code) {
-			continue
-		}
 		primaryPath := ""
 		if len(warning.Paths) > 0 {
 			primaryPath = warning.Paths[0]
+		}
+		if warning.Failed {
+			m.reporter.FileResult(FileUploadResult{
+				IsError:      true,
+				Error:        errors.New(warning.Message),
+				ErrorMessage: warning.Message,
+				Path:         primaryPath,
+				Paths:        warning.Paths,
+			})
+			continue
+		}
+		if !warning.Skipped {
+			continue
 		}
 		m.reporter.FileResult(FileUploadResult{
 			IsLivePhoto: true,
@@ -386,10 +396,6 @@ func (m *UploadManager) reportPreflight(uploadItemCount int, warnings []Prefligh
 			Paths:       warning.Paths,
 		})
 	}
-}
-
-func isSkippedPreflightWarning(code string) bool {
-	return code == "incomplete-live-photo-skipped" || code == "ambiguous-filename-stem"
 }
 
 // handleAlbumCreation handles album creation based on config (manual name/key or AUTO mode)
