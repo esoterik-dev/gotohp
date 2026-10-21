@@ -93,11 +93,11 @@ gotohp-cli upload <path> [<path> ...] [flags]
 | `--hash-threads int` |  | split the work: workers that hash, stage and check for duplicates (default: --threads) |
 | `--ignore-apple-metadata` |  | match Live Photo pairs by filename stem instead of Apple metadata |
 | `--log-file string` |  | write the run's debug log to PATH (default: a new gotohp-upload-<time>-<pid>.log in the current directory) |
-| `-l, --log-level string` | `info` | stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error |
+| `-l, --log-level string` | `info` | stderr log level without the TUI (--no-tui or no terminal): debug, info, warn, error; info logs each uploaded file |
 | `--max-retries int` | `3` | retries after the initial attempt for transient request failures (0 disables) |
 | `--no-log-file` |  | write no debug log file |
 | `--no-tui` |  | disable the interactive progress UI |
-| `--pair-live-photos` |  | pair Apple Live Photo files; files that cannot be paired safely are skipped |
+| `--pair-live-photos` |  | pair Apple Live Photo files; files that cannot be paired safely are not uploaded |
 | `--proxy string` |  | proxy URL for all requests |
 | `-r, --recursive` |  | include subdirectories |
 | `--report-file string` |  | write the final JSON summary to PATH |
