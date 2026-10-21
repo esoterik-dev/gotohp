@@ -180,8 +180,9 @@ func TestCrashIsRecordedInLog(t *testing.T) {
 		cmd := &cobra.Command{Use: "upload"}
 		addRunLogFlags(cmd)
 		_ = cmd.Flags().Set("log-file", path)
-		log := openRunLog(cmd.Flags(), "upload", slog.New(slog.DiscardHandler))
+		log := newRunLog(cmd.Flags(), "upload", slog.New(slog.DiscardHandler))
 		log.Info("before the crash")
+		log.open()
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -203,6 +204,96 @@ func TestCrashIsRecordedInLog(t *testing.T) {
 	for _, want := range []string{`"msg":"before the crash"`, "panic: worker exploded", "goroutine "} {
 		if !strings.Contains(string(text), want) {
 			t.Errorf("log lacks %q:\n%s", want, text)
+		}
+	}
+}
+
+// The log waits in memory until --log-file is checked, so a refused path is
+// never written. A run that stops before the check still writes its log to
+// a new file, but never replaces an existing one it could not check.
+func TestLogFileWrittenOnlyAfterCheck(t *testing.T) {
+	config, photo := emptyAccount(t)
+	dir := t.TempDir()
+
+	newLog := filepath.Join(dir, "new.log")
+	code, _, stderr := runCLI(t, dir, "upload", photo, "--config", config, "--no-tui", "--threads", "0", "--log-file", newLog)
+	if code == 0 || !strings.Contains(stderr, "Debug log: "+newLog) {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if lines := readLog(t, newLog); !hasMsg(lines, "upload command") || !hasMsg(lines, "upload failed") {
+		t.Fatalf("log %v", lines)
+	}
+
+	existing := filepath.Join(dir, "existing.jpg")
+	writeFixture(t, existing, "a photo the run never checked")
+	code, _, stderr = runCLI(t, dir, "upload", photo, "--config", config, "--no-tui", "--threads", "0", "--log-file", existing)
+	if after, _ := os.ReadFile(existing); code == 0 || string(after) != "a photo the run never checked" {
+		t.Fatalf("exit %d, %s now %q", code, existing, after)
+	}
+	if strings.Contains(stderr, "Debug log:") {
+		t.Fatalf("stderr %q", stderr)
+	}
+
+	// Refused although it does not exist yet: it is the report's path.
+	report := filepath.Join(dir, "report.json")
+	code, _, _ = runCLI(t, dir, "upload", photo, "--config", config, "--no-tui", "--log-file", report, "--report-file", report)
+	if _, err := os.Stat(report); code == 0 || err == nil {
+		t.Fatalf("exit %d, %s written (%v)", code, report, err)
+	}
+}
+
+func TestVerifyLogFileRefusedBeforeWork(t *testing.T) {
+	config, _ := emptyAccount(t)
+	dir := t.TempDir()
+	report := filepath.Join(dir, "upload.json")
+	writeFixture(t, report, `{"results":[]}`)
+	out := filepath.Join(dir, "verify.json")
+	writeFixture(t, out, "old verification")
+	cases := map[string]struct {
+		log   string
+		extra []string
+	}{
+		"upload report": {report, nil},
+		"config":        {config, nil},
+		"report file":   {out, []string{"--report-file", out}},
+		"directory":     {dir, nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			before, _ := os.ReadFile(c.log)
+			args := append([]string{"verify-live-photos", report, "--config", config, "--log-file", c.log}, c.extra...)
+			code, _, stderr := runCLI(t, t.TempDir(), args...)
+			if code == 0 || !strings.Contains(stderr, "--log-file") {
+				t.Fatalf("exit %d, stderr %q", code, stderr)
+			}
+			if info, err := os.Stat(c.log); err != nil {
+				t.Fatal(err)
+			} else if !info.IsDir() {
+				if after, _ := os.ReadFile(c.log); string(after) != string(before) {
+					t.Fatalf("%s was overwritten: %q", c.log, after)
+				}
+			}
+		})
+	}
+}
+
+// The default log is created in the working directory, which may be the
+// folder being uploaded; the run must not upload its own log.
+func TestUploadSkipsItsOwnLog(t *testing.T) {
+	config, _ := emptyAccount(t)
+	dir := t.TempDir()
+	writeFixture(t, filepath.Join(dir, "photo.jpg"), "photo")
+	_, stdout, _ := runCLI(t, dir, "upload", ".", "--recursive", "--disable-filter", "--config", config, "--no-tui")
+	var summary uploadSummary
+	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.LogFile == "" || summary.Total != 1 {
+		t.Fatalf("logFile %q, results %+v", summary.LogFile, summary.Results)
+	}
+	for _, r := range summary.Results {
+		if strings.HasSuffix(r.Path, ".log") {
+			t.Fatalf("the run's own log was queued: %+v", summary.Results)
 		}
 	}
 }

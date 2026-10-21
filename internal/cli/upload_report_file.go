@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,21 @@ func validateLogFile(f *pflag.FlagSet, paths []string) error {
 		}
 	}
 	return nil
+}
+
+// validateVerifyLogFile rejects a verify-live-photos --log-file that would
+// overwrite the upload report, the verification report, the config, or that
+// names a directory. Any other file may be replaced, as with upload.
+func validateVerifyLogFile(f *pflag.FlagSet, inputs map[string][]string, reportFile string) error {
+	output, _ := f.GetString("log-file")
+	if output == "" {
+		return nil
+	}
+	inputs = maps.Clone(inputs)
+	if reportFile != "" {
+		inputs["--report-file"] = []string{reportFile}
+	}
+	return checkOutputFile("--log-file", output, inputs)
 }
 
 // checkReportFile is validateReportFile for any command: inputs maps a

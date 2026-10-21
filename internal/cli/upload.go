@@ -540,6 +540,9 @@ func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettin
 	}
 	useTUI := shouldUseTUI(settings)
 	logger, logPath := runLog.core, runLog.path
+	if logPath != "" {
+		opts.SkipFiles = append(opts.SkipFiles, logPath)
+	}
 	logRunStart(runLog.Logger, settings.version, paths, opts)
 	if opts.Api.Policy != nil {
 		opts.Api.Policy.SetLogger(runLog.Logger)

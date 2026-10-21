@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,7 +25,7 @@ func TestWorkerCounts(t *testing.T) {
 		{UploadOptions{}, 1, 0},
 	} {
 		got := tc.opts.normalized()
-		if again := got.normalized(); again != got {
+		if again := got.normalized(); !reflect.DeepEqual(again, got) {
 			t.Fatalf("normalized is not idempotent: %+v then %+v", got, again)
 		}
 		if got.HashThreads != tc.hash || got.UploadThreads != tc.upload {

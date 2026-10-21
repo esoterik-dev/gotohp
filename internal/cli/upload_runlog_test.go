@@ -114,10 +114,11 @@ func (r *countingReporter) ThreadStatus(core.ThreadStatus) { r.statuses++ }
 // Byte-progress updates reach the UI but not the log; stage changes do.
 func TestLoggingReporterLogsStageChangesOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.log")
-	file, handler, err := createRunLog(path)
+	file, err := createRunLog(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug})
 	inner := &countingReporter{}
 	r := newLoggingReporter(inner, slog.New(handler))
 	r.ThreadStatus(core.ThreadStatus{WorkerID: 1, Status: "uploading", FilePath: "a.jpg", BytesUploaded: 1})

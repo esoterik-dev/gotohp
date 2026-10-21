@@ -69,8 +69,9 @@ type uploadRunSettings struct {
 	version    string
 }
 
-// runUploadCommand opens the run's debug log before anything else, so the
+// runUploadCommand starts the run's debug log before anything else, so the
 // log also records warnings and errors that end a run before it uploads.
+// The file itself is written once --log-file has been checked.
 func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	f := cmd.Flags()
 	logLevel, _ := f.GetString("log-level")
@@ -81,7 +82,7 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 	noTUI, _ := f.GetBool("no-tui")
 	settings := uploadRunSettings{noTUI: noTUI, version: cmd.Root().Version}
 	settings.reportFile, _ = f.GetString("report-file")
-	runLog := openRunLog(f, "upload", newLogger(level, os.Stderr, shouldUseTUI(settings)))
+	runLog := newRunLog(f, "upload", newLogger(level, os.Stderr, shouldUseTUI(settings)))
 	defer runLog.close()
 	retryReport, _ := f.GetString("retry-report")
 	workingDir, _ := os.Getwd()
@@ -101,6 +102,8 @@ func runUploadCommand(cmd *cobra.Command, paths []string) error {
 
 func uploadCommand(cmd *cobra.Command, paths []string, settings uploadRunSettings, runLog *runLog) error {
 	warn := runLog.warnings(cmd.ErrOrStderr())
+	// A run that stops before the --log-file check still records why.
+	defer func() { runLog.openIfSafe(func() error { return validateLogFile(cmd.Flags(), paths) }) }()
 	retry, _ := cmd.Flags().GetString("retry-report")
 	if retry != "" {
 		var err error
@@ -132,8 +135,10 @@ func uploadCommand(cmd *cobra.Command, paths []string, settings uploadRunSetting
 		return err
 	}
 	if err := validateLogFile(f, paths); err != nil {
+		runLog.drop()
 		return err
 	}
+	runLog.open()
 	policy, err := requestPolicyFromFlags(f)
 	if err != nil {
 		return err

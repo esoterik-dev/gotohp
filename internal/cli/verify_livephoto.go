@@ -116,10 +116,10 @@ func newVerifyLivePhotosCommand() *cobra.Command {
 	return cmd
 }
 
-// runVerifyLivePhotosCommand opens the run's debug log first, like upload.
+// runVerifyLivePhotosCommand starts the run's debug log first, like upload.
 // Nothing new is printed on stderr; the log only goes to its file.
 func runVerifyLivePhotosCommand(cmd *cobra.Command, args []string) error {
-	runLog := openRunLog(cmd.Flags(), "verify-live-photos", slog.New(slog.DiscardHandler))
+	runLog := newRunLog(cmd.Flags(), "verify-live-photos", slog.New(slog.DiscardHandler))
 	defer runLog.close()
 	workingDir, _ := os.Getwd()
 	runLog.Info("verify-live-photos command", "version", cmd.Root().Version, "pid", os.Getpid(),
@@ -151,9 +151,17 @@ func verifyLivePhotosCommand(cmd *cobra.Command, args []string, runLog *runLog) 
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	reportFile, _ := f.GetString("report-file")
-	if err := checkReportFile(reportFile, map[string][]string{"the upload report": {reportPath}}); err != nil {
+	inputs := map[string][]string{"the upload report": {reportPath}}
+	// A run that stops before the --log-file check still records why.
+	defer runLog.openIfSafe(func() error { return validateVerifyLogFile(f, inputs, reportFile) })
+	if err := checkReportFile(reportFile, inputs); err != nil {
 		return err
 	}
+	if err := validateVerifyLogFile(f, inputs, reportFile); err != nil {
+		runLog.drop()
+		return err
+	}
+	runLog.open()
 
 	uploadReport, err := readVerifyUploadReport(reportPath)
 	if err != nil {
