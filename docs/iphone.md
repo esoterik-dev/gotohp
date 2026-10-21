@@ -15,7 +15,7 @@ Use it when you want **only camera media**. To back up everything on the phone (
 | Ordinary MOV videos, MP4, other types | no — upload these separately |
 | Files whose metadata cannot be read | no — listed as unreadable; check the mount and rerun |
 
-Selected photos and videos are then paired by gotohp. A file that cannot be paired safely (its partner is missing, its metadata is unreadable, or several files share one Live Photo identifier) is skipped with a warning rather than uploaded on its own; see [Live Photos](cli-guide.md#live-photos).
+Selected photos and videos are then paired by gotohp. A file that cannot be paired safely (its partner is missing, or several files share one Live Photo identifier) is skipped with a warning rather than uploaded on its own. A file whose metadata gotohp cannot read is listed as failed instead, so the run exits with an error; rerun the same command to try it again. See [Live Photos](cli-guide.md#live-photos).
 
 ## Requirements
 
