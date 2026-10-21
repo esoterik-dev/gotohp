@@ -115,10 +115,10 @@ if git show-ref --verify --quiet refs/heads/dev; then
   # second parents of dev's merges) count as known even after the PR was
   # rebased, squash-merged or closed, and its old commits left every ref.
   mapfile -t merged_heads < <(git rev-list --merges --parents origin/main..dev | cut -d' ' -f3- | tr ' ' '\n')
-  orphaned=$(git rev-list --no-merges dev --not origin/main "${pr_refs[@]}" "${merged_heads[@]}")
-  if [[ -n $orphaned ]]; then
+  mapfile -t orphaned < <(git rev-list --no-merges dev --not origin/main "${pr_refs[@]}" "${merged_heads[@]}")
+  if ((${#orphaned[@]})); then
     echo "dev has commits that are not in main or any merged PR; move them to a PR branch first:" >&2
-    git log --oneline --no-walk $orphaned >&2; exit 1
+    git log --oneline --no-walk "${orphaned[@]}" >&2; exit 1
   fi
   previous=$(git rev-parse dev)
   $background || git switch --quiet dev
