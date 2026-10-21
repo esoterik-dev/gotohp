@@ -117,6 +117,7 @@ type uploadModel struct {
 	cancel       func()       // abort in-flight files
 	workingDir   string
 	logFile      string
+	started      time.Time // when the run started, for the summary
 	pausedUntil  time.Time // all requests paused by a 429 until then
 	pauseTicking bool
 	queued       int // hashed files waiting for an upload worker
@@ -532,6 +533,7 @@ func newLogger(level slog.Level, w io.Writer, tui bool) *slog.Logger {
 func runUpload(paths []string, opts core.UploadOptions, settings uploadRunSettings, runLog *runLog) error {
 	model := initialModel()
 	model.workingDir, _ = os.Getwd()
+	model.started = time.Now()
 	programOptions := []tea.ProgramOption{tea.WithoutSignalHandler()}
 	if !shouldUseTUI(settings) {
 		programOptions = append(
@@ -619,8 +621,10 @@ func forwardSignals(p *tea.Program, signals <-chan os.Signal, done <-chan struct
 
 // finishUpload writes the complete result before reporting a failed run. The
 // report file is the durable record, so it is written even if stdout fails.
+// On a terminal, output gets a readable summary instead of the JSON.
 func finishUpload(model uploadModel, output io.Writer, reportFile string) error {
-	jsonOutput, err := json.MarshalIndent(buildUploadSummary(model), "", "  ")
+	summary := buildUploadSummary(model)
+	jsonOutput, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return fmt.Errorf("error generating JSON: %w", err)
 	}
@@ -631,7 +635,13 @@ func finishUpload(model uploadModel, output io.Writer, reportFile string) error 
 			reportErr = fmt.Errorf("error writing JSON report %q: %w", reportFile, err)
 		}
 	}
-	if _, err := output.Write(jsonOutput); err != nil {
+	if outputIsTerminal(output) {
+		var elapsed time.Duration
+		if !model.started.IsZero() {
+			elapsed = time.Since(model.started)
+		}
+		writeTextSummary(output, summary, elapsed, reportFile)
+	} else if _, err := output.Write(jsonOutput); err != nil {
 		outputErr = fmt.Errorf("error writing JSON: %w", err)
 	}
 	if err := errors.Join(reportErr, outputErr); err != nil {

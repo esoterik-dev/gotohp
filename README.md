@@ -58,7 +58,7 @@ scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-loca
 jq -c 'select(.level == "WARN" or .level == "ERROR")' gotohp-upload-*.log
 ```
 
-Ctrl+C once lets the files in progress finish and writes the report; press it again to stop at once.
+When a run ends, the terminal shows a short summary (counts, failed files, report and log paths); pipe or redirect the output to get the full JSON summary instead. Ctrl+C once lets the files in progress finish and writes the report; press it again to stop at once.
 
 More:
 

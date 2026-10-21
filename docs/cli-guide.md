@@ -52,7 +52,9 @@ With a state file, rerunning the original command is the simplest retry: confirm
 
 ## Reports and retrying failures
 
-`--report-file <path>` writes the final JSON summary to a file while keeping the interactive progress UI visible when the command is run in a terminal. Keep each run's report under a new filename.
+When a run ends, a terminal gets a short summary: how many items were uploaded, already in the library, confirmed earlier, skipped and failed; the failed files with their errors and the files skipped for a reason that may need action (up to 20 each); and where the report and the debug log are. When the output is piped or redirected (`| jq`, `> run.json`), it is the full JSON summary instead, as scripts expect.
+
+`--report-file <path>` writes the full JSON summary to a file in either case, while keeping the interactive progress UI visible when the command is run in a terminal. Keep each run's report under a new filename.
 
 `gotohp-cli upload --retry-report upload-report.json --threads 1` retries only failed, non-skipped paths, without rescanning a directory. Do not supply positional paths with this flag. Repeat the original account, quality, date, album, and pairing/repair flags as needed; a report is not a configuration file. Two-file failures require `--pair-live-photos`. Album-only failures need separate album repair and are not silently treated as successful file retries. Relative paths resolve against the directory the original upload ran in. A canceled run's report can be retried, but items that never started are not in it; rerun the original sources to include them; a report from a run canceled before any file started is rejected for the same reason. Files that no longer exist are skipped with a warning. With nothing left to retry, the command still writes an empty `--report-file` and exits 0.
 
