@@ -14,16 +14,17 @@ import (
 	"app/core"
 )
 
-func TestDefaultRunLogPathUsesStateDir(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", "/state")
-	path, err := defaultRunLogPath(time.Date(2026, 10, 18, 5, 16, 0, 0, time.UTC))
+func TestDefaultRunLogPathIsInWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	path, err := defaultRunLogPath("upload", time.Date(2026, 10, 18, 5, 16, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir := filepath.Dir(path); dir != filepath.Join("/state", "gotohp", "logs") {
-		t.Fatalf("log in %s", dir)
+	if !samePath(filepath.Dir(path), dir) {
+		t.Fatalf("log in %s, want %s", filepath.Dir(path), dir)
 	}
-	if base := filepath.Base(path); !strings.HasPrefix(base, "upload-20261018-051600-") || !strings.HasSuffix(base, ".log") {
+	if base := filepath.Base(path); !strings.HasPrefix(base, "gotohp-upload-20261018-051600-") || !strings.HasSuffix(base, ".log") {
 		t.Fatalf("log name %s", base)
 	}
 }
@@ -113,10 +114,11 @@ func (r *countingReporter) ThreadStatus(core.ThreadStatus) { r.statuses++ }
 // Byte-progress updates reach the UI but not the log; stage changes do.
 func TestLoggingReporterLogsStageChangesOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.log")
-	file, handler, err := openRunLog(path)
+	file, err := createRunLog(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: slog.LevelDebug})
 	inner := &countingReporter{}
 	r := newLoggingReporter(inner, slog.New(handler))
 	r.ThreadStatus(core.ThreadStatus{WorkerID: 1, Status: "uploading", FilePath: "a.jpg", BytesUploaded: 1})
@@ -127,6 +129,16 @@ func TestLoggingReporterLogsStageChangesOnly(t *testing.T) {
 	lines := readLog(t, path)
 	if inner.statuses != 3 || len(lines) != 3 || !hasMsg(lines, "file uploaded") {
 		t.Fatalf("ui=%d log=%v", inner.statuses, lines)
+	}
+	// Each stage change says how long the stage before it took.
+	if _, ok := lines[0]["previous_ms"]; ok {
+		t.Fatalf("first stage has a previous stage: %v", lines[0])
+	}
+	if lines[1]["previous_status"] != "uploading" || lines[1]["previous_file"] != "a.jpg" {
+		t.Fatalf("no previous stage on a stage change: %v", lines[1])
+	}
+	if _, ok := lines[1]["previous_ms"].(float64); !ok {
+		t.Fatalf("no stage duration: %v", lines[1])
 	}
 }
 

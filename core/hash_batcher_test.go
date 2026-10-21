@@ -5,6 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,5 +131,27 @@ func TestBatcherHonoursCancellation(t *testing.T) {
 	defer cancel()
 	if _, err := b.FindRemoteMediaByHash(ctx, []byte("x")); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// The debug log shows how many hashes each batched lookup carried, through
+// the real Api and its request policy logger.
+func TestBatchLookupIsLogged(t *testing.T) {
+	a, b := bytes.Repeat([]byte{1}, 20), bytes.Repeat([]byte{2}, 20)
+	reply := batchResponse(map[string]string{string(a): "AF1QipA"}, [][]byte{a, b})
+	api := &Api{
+		policy:            mustPolicy(t, 0, true, 0),
+		authResponseCache: map[string]string{"Auth": "test", "Expiry": "9999999999"},
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(reply))}, nil
+		})},
+	}
+	var out bytes.Buffer
+	api.policy.SetLogger(slog.New(slog.NewJSONHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	if _, err := api.FindRemoteMediaByHashes(context.Background(), [][]byte{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"msg":"hash lookup batch","hashes":2,"found":1`) {
+		t.Fatalf("log: %s", out.String())
 	}
 }

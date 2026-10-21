@@ -563,17 +563,28 @@ func filterGooglePhotosFilesWithCancel(paths []string, opts UploadOptions, cance
 		info          os.FileInfo
 	}
 	seenFiles := make(map[string][]seenUploadFile)
+	var skipped []seenUploadFile
+	for _, path := range opts.SkipFiles {
+		info, _ := os.Stat(path)
+		skipped = append(skipped, seenUploadFile{canonicalPath: canonicalUploadPath(path), info: info})
+	}
 	appendFile := func(path string, info os.FileInfo) {
 		if !opts.DisableUnsupportedFilesFilter && !isSupportedByGooglePhotos(path) {
 			return
 		}
 		canonicalPath := canonicalUploadPath(path)
+		if info == nil {
+			info, _ = os.Stat(path)
+		}
+		for _, skip := range skipped {
+			if canonicalPath == skip.canonicalPath ||
+				(info != nil && skip.info != nil && os.SameFile(info, skip.info)) {
+				return
+			}
+		}
 		bucketKey := canonicalPath
 		if runtime.GOOS == "windows" {
 			bucketKey = strings.ToLower(bucketKey)
-		}
-		if info == nil {
-			info, _ = os.Stat(path)
 		}
 		for _, seen := range seenFiles[bucketKey] {
 			if canonicalPath == seen.canonicalPath ||

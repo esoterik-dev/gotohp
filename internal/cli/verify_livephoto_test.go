@@ -170,7 +170,7 @@ func TestCanceledVerificationReportsUnstartedPairs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	pairs := []verifyPairInput{{Index: 0, ResolveErr: "x"}, {Index: 1, ResolveErr: "x"}}
-	results := verifyPairs(ctx, pairs, remoteMatchFunc(nil), 1, func() {})
+	results := verifyPairs(ctx, pairs, remoteMatchFunc(nil), 1, func(livePhotoVerificationItem) {})
 	for _, r := range results {
 		if r.Status == "" {
 			t.Fatalf("pair left without a status: %+v", results)

@@ -8,7 +8,10 @@ type UploadOptions struct {
 
 	Recursive      bool
 	ExcludePattern string
-	Threads        int
+	// SkipFiles are files the run writes itself, such as the CLI's debug
+	// log; they are never uploaded, even when a scanned folder holds them.
+	SkipFiles []string
+	Threads   int
 	// HashThreads and UploadThreads split the work into two pools: hash
 	// workers hash, stage and check for duplicates, upload workers transfer
 	// and commit new files. When neither is set, Threads workers each handle
