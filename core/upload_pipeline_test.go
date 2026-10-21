@@ -472,10 +472,16 @@ func TestUploadDuplicateWithFailedDeleteIsSkipped(t *testing.T) {
 	path := writePhotos(t, dir, 1)[0]
 	lib := newFakeLibrary()
 	lib.add(t, path)
+	// A read-only folder blocks the delete on Unix, an open handle on Windows.
 	if err := os.Chmod(dir, 0500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
 	_, rec := startRun(lib, []string{path}, UploadOptions{Threads: 1, DeleteFromHost: true})
 	rec.wait(t)
 	if len(rec.results) != 1 || !rec.results[0].Skipped || rec.results[0].SkipCode != "remote-duplicate" {
