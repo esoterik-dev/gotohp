@@ -1,7 +1,11 @@
-# Fork integration scripts
+# Scripts
 
-These scripts serve a fork that keeps a `dev` integration branch. They are not
-needed to build or use gotohp.
+`gotohp-iphone-upload.sh` uploads the camera roll of a mounted iPhone; see
+[docs/iphone.md](../docs/iphone.md).
+
+The rest of this page is about `update-dev.sh` and the `Sync dev integration
+branch` workflow. They serve a fork that keeps a `dev` integration branch and
+are not needed to build or use gotohp.
 
 ## `update-dev.sh`
 
@@ -48,3 +52,8 @@ Runs `update-dev.sh --no-build` from `main` whenever a PR changes or `main`
 moves, once the workflow is on the default branch. It runs no PR code: the
 script only merges Git refs. Local binaries are updated by the script, not by
 GitHub Actions.
+
+The workflow and a local run create their own merge commits, so the same
+inputs give two different `dev` commits with the same files. After a workflow
+run, the next local run force-pushes its own `dev` over it, and the next
+workflow run does the same in turn. The content of `dev` does not change.
