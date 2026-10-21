@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +32,6 @@ var skipLabels = map[string]string{
 	"incomplete-live-photo-skipped":      "Live Photo partner missing",
 	"ambiguous-identifier":               "Live Photo ambiguous",
 	"ambiguous-filename-stem":            "Live Photo ambiguous",
-	"metadata-read-failed":               "metadata unreadable",
 	"missing-still-image-time":           "Live Photo video without still marker",
 }
 
@@ -79,7 +79,13 @@ func writeTextSummary(w io.Writer, s uploadSummary, elapsed time.Duration, repor
 	if elapsed > 0 {
 		head += " in " + elapsed.Round(time.Second).String()
 	}
-	fmt.Fprintf(w, "%s: %s items\n", head, thousands(len(s.Results)))
+	if s.Canceled {
+		// A stopped run reports only the items that finished; the total counts
+		// every item found.
+		fmt.Fprintf(w, "%s: %s of %s items finished\n", head, thousands(len(s.Results)), thousands(max(s.Total, len(s.Results))))
+	} else {
+		fmt.Fprintf(w, "%s: %s items\n", head, thousands(len(s.Results)))
+	}
 	rows := [][2]string{{"uploaded", thousands(uploaded)}}
 	codes := make([]string, 0, len(skipCounts))
 	for code := range skipCounts {
@@ -125,7 +131,7 @@ func writeTextSummary(w io.Writer, s uploadSummary, elapsed time.Duration, repor
 		fmt.Fprintf(w, "\nWarnings: %d (listed in the JSON report)\n", n)
 	}
 	if s.Canceled {
-		fmt.Fprintln(w, "\nFiles that never started are not listed; rerun the same command (with --state-file) to include them.")
+		fmt.Fprintln(w, "\nFiles that did not finish are not listed; rerun the same command (with --state-file) to include them.")
 	}
 	fmt.Fprintln(w)
 	if reportFile != "" {
@@ -139,6 +145,12 @@ func listFiles(w io.Writer, title string, results []uploadResult, workingDir str
 	if len(results) == 0 {
 		return
 	}
+	// Results arrive in the order files finish; sort them so that two runs
+	// over the same files list them the same way.
+	results = slices.Clone(results)
+	sort.SliceStable(results, func(i, j int) bool {
+		return displayPath(results[i], workingDir) < displayPath(results[j], workingDir)
+	})
 	fmt.Fprintf(w, "\n%s (%d):\n", title, len(results))
 	for i, r := range results {
 		if i == maxListed {

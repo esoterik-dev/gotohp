@@ -47,7 +47,7 @@ func TestUploadOnTerminalPrintsSummaryNotJSON(t *testing.T) {
 func TestTextSummaryCountsAndLists(t *testing.T) {
 	wd := filepath.FromSlash("/runs/today")
 	in := func(name string) string { return filepath.Join(wd, "DCIM", name) }
-	s := uploadSummary{WorkingDirectory: wd, Canceled: true, Warnings: []uploadWarning{{Code: "x"}}}
+	s := uploadSummary{WorkingDirectory: wd, Canceled: true, Total: 30, Warnings: []uploadWarning{{Code: "x"}}}
 	s.Results = append(s.Results,
 		uploadResult{Path: in("new.jpg"), Success: true},
 		uploadResult{Path: in("dup.jpg"), Skipped: true, SkipCode: "remote-duplicate"},
@@ -56,25 +56,39 @@ func TestTextSummaryCountsAndLists(t *testing.T) {
 		uploadResult{Path: in("IMG_1.HEIC"), Skipped: true, SkipCode: "incomplete-live-photo-skipped"},
 		uploadResult{Path: in("IMG_2.HEIC"), Paths: []string{in("IMG_2.HEIC"), in("IMG_2.MOV")}, Error: "upload Live Photo video: 503\nbody"},
 	)
-	for i := range 21 {
-		s.Results = append(s.Results, uploadResult{Path: fmt.Sprintf("/elsewhere/f%02d.jpg", i), Error: "429"})
+	// Added last, but outside the working directory, so shown in full and
+	// listed first.
+	for i := 19; i >= 0; i-- {
+		s.Results = append(s.Results, uploadResult{Path: filepath.Join(wd, "later", fmt.Sprintf("f%02d.jpg", i)), Error: "429"})
 	}
+	s.Results = append(s.Results, uploadResult{Path: filepath.FromSlash("/elsewhere/x.jpg"), Error: "429"})
 	var out strings.Builder
 	writeTextSummary(&out, s, 90*time.Second, "")
 	text := out.String()
 	for _, want := range []string{
-		"Stopped (Ctrl+C) in 1m30s: 27 items",
+		"Stopped (Ctrl+C) in 1m30s: 27 of 30 items finished",
 		"already in library", "confirmed earlier (state file)", "skipped: Live Photo partner missing",
 		"Failed (22):",
 		filepath.FromSlash("DCIM/IMG_2.HEIC") + " + " + filepath.FromSlash("DCIM/IMG_2.MOV") + ": upload Live Photo video: 503\n",
 		"... and 2 more (see the report)",
 		"Not uploaded (1):", filepath.FromSlash("DCIM/IMG_1.HEIC") + ": Live Photo partner missing",
-		"Warnings: 1", "Files that never started are not listed",
+		"Warnings: 1", "Files that did not finish are not listed",
 		"Full JSON report: add --report-file PATH",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("summary lacks %q:\n%s", want, text)
 		}
+	}
+	// Failed files are listed by path, not in the order they finished; the
+	// later/ failures were added from f19 down to f00.
+	order := []string{filepath.FromSlash("/elsewhere/x.jpg"), filepath.FromSlash("DCIM/IMG_2.HEIC"), filepath.FromSlash("later/f00.jpg"), filepath.FromSlash("later/f17.jpg")}
+	for i := 1; i < len(order); i++ {
+		if a, b := strings.Index(text, order[i-1]), strings.Index(text, order[i]); a < 0 || b < 0 || a > b {
+			t.Errorf("%s not listed before %s:\n%s", order[i-1], order[i], text)
+		}
+	}
+	if strings.Contains(text, "f18.jpg") || strings.Contains(text, "f19.jpg") {
+		t.Errorf("listed past the limit in sorted order:\n%s", text)
 	}
 	// Routine skips are counted but not listed one by one.
 	if strings.Contains(text, "dup.jpg") || strings.Contains(text, "known.jpg") {
