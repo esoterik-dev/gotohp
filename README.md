@@ -17,48 +17,54 @@ Unofficial Google Photos Desktop GUI Client
 
 ## [Download](https://github.com/xob0t/gotohp/releases/latest)
 
-## CLI usage
+## CLI quick start
 
-Download the `gotohp-cli` release artifact for your platform. It runs without the GUI.
+Download the `gotohp-cli` release artifact for your platform; it runs without the GUI. The GUI binary also runs these commands, e.g. `gotohp upload ...`.
 
 ```shell
-gotohp-cli upload /path/to/photos --recursive --threads 5
-# Hash quickly without issuing eight concurrent network operations:
-gotohp-cli upload /path/to/photos --recursive --hash-threads 8 --upload-threads 2
-gotohp-cli upload /path/to/photos --recursive --report-file upload-report.json
-gotohp-cli creds add "<oauth_token cookie value>"   # Embedded Setup sign-in, see below
-gotohp-cli creds add "androidId=..."                 # or a raw credential string
-gotohp-cli creds add - < token.txt                   # or read either from stdin
-gotohp-cli creds set user@gmail.com
+# 1. Add your Google account (how to get the value: see "Sign in" below).
+#    "-" reads it from standard input, so it stays out of shell history:
+#    paste it, press Enter, then Ctrl+D.
+gotohp-cli creds add -
+gotohp-cli creds list
+gotohp-cli creds set you@gmail.com        # pick the account, if you have several
+
+# 2. Upload a folder (files already in your library are skipped)
+gotohp-cli upload --recursive ~/Pictures
+
+# 3. A large or mostly uploaded library: resumable, with a report
+gotohp-cli upload --recursive --hash-threads 8 --upload-threads 2 \
+  --state-file upload-state.json --update-state \
+  --report-file upload-report.json ~/Pictures
+
+# 4. Retry: run the same command again. Files the state file confirms are
+#    skipped without being read; failures and files never started are retried.
+#    Or retry only the failures listed in a report:
+gotohp-cli upload --retry-report upload-report.json --report-file retry-report.json
+
+# 5. A phone, network share or other unstable mount: copy each file locally first
+gotohp-cli upload --recursive --stage-local --threads 1 \
+  --state-file upload-state.json --update-state /mnt/phone/DCIM
+
+# 6. Apple Live Photos: upload each photo + video as one Live Photo, then verify
+gotohp-cli upload --recursive --pair-live-photos --report-file live.json ~/iPhone-export
+gotohp-cli verify-live-photos live.json --report-file live-verification.json
+
+# 7. iPhone camera roll on Linux (camera photos and Live Photos only)
+scripts/gotohp-iphone-upload.sh --dry-run ~/mnt/iPhone/DCIM
+scripts/gotohp-iphone-upload.sh --account you@gmail.com --threads 1 --stage-local ~/mnt/iPhone/DCIM
+
+# 8. Something went wrong? Every run writes a debug log in the current directory
+jq -c 'select(.level == "WARN" or .level == "ERROR")' gotohp-upload-*.log
 ```
 
-The CLI shares the config file with the GUI, but reads only the stored credentials from it. Everything else (proxy, quality, upload behaviour) is set by flags, so a scripted run is unaffected by preferences changed in the GUI. Pass `--config <path>` to use a different config file and `--account <email>` to upload with a specific stored account.
+Ctrl+C once lets the files in progress finish and writes the report; press it again to stop at once.
 
-`--report-file <path>` writes the final JSON summary to a file while keeping the interactive progress UI visible when the command is run in a terminal.
+More:
 
-Every upload run also writes a debug log, as JSON lines, to a new `gotohp-upload-<time>-<pid>.log` in the current directory; `--log-file PATH` writes it to PATH instead, and `--no-log-file` turns it off. The log starts before anything else, so it also records the warnings and the error of a run that stops before uploading; its lines wait in memory until the log's path has been checked (see below) and are then written to the file. The run never uploads its own log, even when the current directory is an upload folder. It records the run's options, each worker's stage changes (hashing, checking, uploading, committing) with how long the previous stage took, every request with its status and duration, each batched duplicate check with how many hashes it carried, waits caused by a 429 pause and how long they last, retries with the server's error response, Ctrl+C, and each file's result. Once the file is written, if the program crashes, the crash's stack trace is appended to the log as plain text after the JSON lines. Credentials are not logged. These events go only to the log; stderr without the TUI shows the same messages as before, filtered by `--log-level`. `--log-file` refuses, before anything is written to it, the config, the report, the state file and its lock, an upload path or a file inside one, and a directory; any other existing file is replaced. If the run stops before that check, the log is written only to a new file, never over an existing one. The path is printed at the end of the run and stored as `logFile` in the JSON summary. Logs are never deleted automatically. `verify-live-photos` writes the same kind of log (`gotohp-verify-live-photos-<time>-<pid>.log`), with every pair's result, and takes the same two flags; its `--log-file` refuses the upload report, the config, its `--report-file` and a directory. To see why a run seems stuck, for example: `jq -c 'select(.level == "WARN")' <log>`.
-
-The first Ctrl+C (or SIGTERM) starts no new files and lets in-progress files finish, then writes the report and exits with status 130 (143 for SIGTERM). Albums are still created for the files that finished. A second Ctrl+C aborts in-progress files and quits at once, keeping the results that already arrived. It creates no album, so files that finished are not added to `--album`; the report says so.
-
-`--stage-local` copies each upload item to local temporary storage before hashing and uploading. Use it for FUSE, device, or unstable mounts; temporary copies are removed when the item finishes, and on a force quit (second Ctrl+C). Copies go to `$TMPDIR` (default `/tmp`), which is RAM-backed tmpfs on many Linux distributions, so with several threads and large videos point it at a disk, e.g. `TMPDIR=/var/tmp gotohp-cli upload --stage-local ...`. With `--delete`, a source that changed after it was staged is kept.
-
-Requests are not paced by default: workers go as fast as they can. HTTP 429 responses pause the whole run, honoring `Retry-After` or waiting at least one minute when absent, then workers resume spread over about two seconds and retry the same request. After a pause, Photos requests run at half the number sent in the last minute (at least 30 a minute; early in a run this is slower than the rate that caused the 429) and speed up again by a fifth every 50 successful requests, so the run does not hit the quota again right away; with fewer than 20 requests in the last minute the 429 is not ours and only the pause applies. The progress view shows such a pause with a countdown. With `--hash-threads` or `--upload-threads` and without `--stage-local`, it also shows how many hashed files are waiting for an upload worker; with `--stage-local` at most one file per upload worker waits, and that is not shown. A commit that failed is looked up in the library before it is retried or reported, since a 429 or 5xx can arrive after the item was stored. `--retry-429=false` disables 429 retries; `--max-retries 0` disables all request retries. The default is three retries after the initial attempt, independently for each operation. A failed duplicate check fails the file instead of uploading it, so it can be retried without risking a duplicate. `--requests-per-minute N` adds a cap shared by all workers, if you prefer to stay below the quota rather than react to it. Separate CLI processes do not share limits or pauses. The GUI does not pace requests or share pauses, but follows the same retry rules and also fails a file whose duplicate check fails.
-
-With `--pair-live-photos`, a photo and video sharing an Apple Live Photo identifier are uploaded together as one linked Live Photo, in a single commit. A file that may be half of a Live Photo but cannot be paired safely is not uploaded on its own: a still uploaded without its video cannot be linked to it later. A photo or video whose partner is not in the run, a video without the still-image-time marker, and several photos or videos sharing one identifier are skipped with a warning and listed as skipped in the report. A photo or video whose metadata cannot be read (for example on a flaky phone mount) is listed as failed instead, so the run exits with an error and `--retry-report` tries it again. Its partner, if it was in the run, was skipped as incomplete and is not part of that retry; to upload the pair, rerun the original sources, with `--state-file` to skip files already uploaded. `--upload-incomplete-live-photos` uploads such files as single files instead. With `--ignore-apple-metadata`, a video with neither a Live Photo identifier nor the still-image-time marker is uploaded as an ordinary video unless a photo shares its filename stem.
-
-For a report containing Apple Live Photo pairs, `gotohp-cli verify-live-photos upload-report.json --threads 1 --report-file verification.json` compares both local hashes with remote metadata, without downloading media. Files are read from the paths in the report; if they have moved, `--source-root /path/to/DCIM` finds each by name under the new root and reports names it cannot tell apart as ambiguous. Unresolved pairs return a nonzero exit status, and Ctrl+C writes a partial report. It takes the same `--max-retries`, `--retry-429` and `--requests-per-minute` flags as `upload`, and a 429 pauses all its workers. This checks shared remote keys, not playback; spot-check important pairs in Google Photos.
-
-`--threads N` runs N workers, each hashing, checking and uploading its own files; the GUI's thread setting works the same way. Setting `--hash-threads` or `--upload-threads` splits the work into two pools instead (the other one defaults to `--threads`). Hash workers make the `--stage-local` copies and check whether each file or Live Photo pair is already in the library, so a mostly uploaded library is paced by `--hash-threads`. Their duplicate checks are sent together, one request for up to one lookup per hash worker, so a run makes several times fewer requests and reaches the rate limit much later. Only new files are queued for the upload workers, which handle upload sessions and commits; with `--update-existing-photos-to-live`, a pair whose still photo is already in the library is queued too, so an upload worker can turn it into a Live Photo. Without `--stage-local`, hash workers hand new files to the queue and keep checking ahead, so duplicates never wait behind uploads. With `--stage-local` each queued file holds a temporary copy, so the queue is bounded and a hash worker waiting for an upload worker shows `queued`. Use the split for libraries that are mostly uploaded already, e.g. `--hash-threads 8 --upload-threads 2`. Ctrl+C stops starting new files; files that never started are left out of the report. Files already hashed but still waiting in the queue for an upload worker count as not started: they are not uploaded and not reported, so rerun the sources to upload them. Thread counts do not replace API rate limiting. Without `--stage-local`, a file that changes after it was hashed is rejected; rerun it once the source is stable. With `--stage-local`, the staged copy is uploaded anyway and only `--delete` keeps the changed source. Staging happens on the hash workers, so up to about `--hash-threads` + 2 × `--upload-threads` copies can exist at once (one per hash worker, plus queued and uploading files); with `--threads N` alone, up to N.
-
-To resume large imports, use `gotohp-cli upload /path/to/photos --recursive --state-file upload-state.json --update-state`. Supplying only `--state-file` reads an existing file without modifying it. Confirmations are scoped to the selected account, upload policy, logical media type, and paths; unchanged path/size/mtime records skip the item without rereading or hashing it. Changed files are hashed again. This metadata shortcut assumes timestamps are trustworthy; use `--revalidate-state` to ignore cached confirmations and recheck the server, especially after remote deletions.
-
-The state file is an append-only log: each confirmed item appends and syncs one line, and opening it with `--update-state` compacts it. One writer at a time holds an OS lock on `upload-state.json.lock`; the lock is released when the process exits, even after a crash, so the leftover file is harmless. Failed uploads and incomplete Live Photo skips are not saved. Cache-only hits never delete originals. With `--delete` and `--update-state`, each item's confirmation is saved before its sources are deleted; keep independent backups. If an item is uploaded but its confirmation cannot be saved (for example, with `--stage-local` its source changed after it was copied), it is reported as uploaded with a `state-checkpoint-failed` warning, which does not change the exit status, and its sources are kept. State covers media uploads, not album completion: use an existing album key when resuming album work, rather than repeatedly creating an album by name.
-
-Run `gotohp-cli help` or `gotohp-cli upload --help` for all commands and options.
-
-`gotohp-cli upload --retry-report upload-report.json --threads 1` retries only failed, non-skipped paths, without rescanning a directory. Do not supply positional paths with this flag. Repeat the original account, quality, date, album, and pairing/repair flags as needed; a report is not a configuration file. Two-file failures require `--pair-live-photos`. Album-only failures need separate album repair and are not silently treated as successful file retries. Relative paths resolve against the directory the original upload ran in. A canceled run's report can be retried, but items that never started are not in it; rerun the original sources to include them; a report from a run canceled before any file started is rejected for the same reason. Files that no longer exist are skipped with a warning. With nothing left to retry, the command still writes an empty `--report-file` and exits 0. Keep each run's report under a new filename.
-
-The GUI binary runs the same CLI when given a command, e.g. `gotohp upload ...`.
+- [CLI guide](docs/cli-guide.md): how the options work — workers and threads, rate limits and retries, the state file, reports, Ctrl+C, debug logs, Live Photos.
+- [Command reference](docs/cli-reference.md): every command and option with its default (also `gotohp-cli help` and `gotohp-cli upload --help`).
+- [Uploading an iPhone camera roll](docs/iphone.md): the iPhone script, what it selects, and its files.
 
 ## Sign in
 
