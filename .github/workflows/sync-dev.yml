@@ -1,0 +1,35 @@
+name: Sync dev integration branch
+
+on:
+  # No branch filter: stacked PRs target other PR branches, not main.
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed, edited]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: sync-dev
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      # Never execute PR code in this privileged workflow. The script comes from
+      # main and, with --no-build, only merges Git refs.
+      - name: Rebuild dev from main and the owner's open PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          scripts/update-dev.sh --no-build
